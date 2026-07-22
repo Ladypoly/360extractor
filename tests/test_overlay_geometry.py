@@ -23,7 +23,7 @@ from threesixty.web.server import STATIC
 
 pytestmark = pytest.mark.ffmpeg
 
-GEOMETRY = STATIC / "geometry.js"
+GEOMETRY = STATIC / "js" / "geometry.js"
 WIDTH, HEIGHT = 4096, 2048
 #: Small on purpose: a fat marker straddles the frustum edge and reads as visible
 #: well past it, which looks like an overlay bug but is only the probe's own size.

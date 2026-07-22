@@ -19,8 +19,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import picker
+from . import picker, stages
+from .jobs import AlreadyRunning, JobRegistry
 from ..mask import geometric
+from ..tools import survey as tool_survey
 from ..extract import run_extraction
 from ..ffmpeg import FFmpegError, MediaInfo, probe_media, resolve_ffmpeg
 from ..plan import FrameSelection, camera_size, plan_extraction
@@ -37,32 +39,33 @@ from ..rig import PRESETS, Camera, Grade, Orientation, Output, Rig, RigError
 STATIC = Path(__file__).parent / "static"
 PREVIEW_WIDTH = 1600
 
+#: Extensions the UI and the embedded viewer need, with the types browsers insist on.
+#: A module served as text/plain is refused outright, which is a confusing way to find
+#: out you forgot one.
+CONTENT_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".json": "application/json",
+    ".map": "application/json",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".ico": "image/x-icon",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".ttf": "font/ttf",
+    ".wasm": "application/wasm",
+    ".ply": "application/octet-stream",
+    ".txt": "text/plain; charset=utf-8",
+}
 
-class Job:
-    """A running extraction, polled by the browser."""
 
-    def __init__(self) -> None:
-        self.lock = threading.Lock()
-        self.state = "idle"  # idle | running | done | error | cancelled
-        self.message = ""
-        self.fraction = 0.0
-        self.images = 0
-        self.thread: threading.Thread | None = None
-        self.cancel = threading.Event()
-
-    def snapshot(self) -> dict:
-        with self.lock:
-            return {
-                "state": self.state,
-                "message": self.message,
-                "fraction": self.fraction,
-                "images": self.images,
-            }
-
-    def update(self, **fields) -> None:
-        with self.lock:
-            for key, value in fields.items():
-                setattr(self, key, value)
+def _static_type(path: str) -> str:
+    return CONTENT_TYPES.get(Path(path).suffix.lower(), "")
 
 
 class Session:
@@ -71,7 +74,6 @@ class Session:
     def __init__(self, ffmpeg, project=None) -> None:
         self.ffmpeg = ffmpeg
         self.cache = Path(tempfile.mkdtemp(prefix="360extract-ui-"))
-        self.job = Job()
         self.counter = 0
         self.lock = threading.Lock()
         #: The open project, if any. Owns the painted occluder and remembers settings.
@@ -81,6 +83,9 @@ class Session:
         #: is what makes the grade sliders usable live.
         self.preview_source: Path | None = None
         self.preview_key: tuple | None = None
+        #: One job per pipeline stage. Replaces the single session-wide job, which
+        #: could not tell extraction from detection and blocked both.
+        self.jobs = JobRegistry()
 
     def next_name(self, suffix: str) -> Path:
         with self.lock:
@@ -136,6 +141,48 @@ class Handler(BaseHTTPRequestHandler):
             return {}
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
+    def _safe_join(self, root: Path, relative: str) -> Path | None:
+        """Resolve `relative` under `root`, refusing anything that escapes it."""
+        candidate = (root / relative.lstrip("/")).resolve()
+        try:
+            candidate.relative_to(root.resolve())
+        except ValueError:
+            return None
+        return candidate
+
+    def _serve_static(self, route_path: str) -> None:
+        target = self._safe_join(STATIC, route_path)
+        if target is None:
+            self._json({"error": "not found"}, 404)
+            return
+        self._file(target, _static_type(route_path))
+
+    def _serve_viewer(self, relative: str) -> None:
+        """Serve the local SuperSplat build."""
+        from ..tools import find_supersplat
+
+        viewer = find_supersplat()
+        if not viewer.found:
+            self._json({"error": "no SuperSplat build found"}, 404)
+            return
+        target = self._safe_join(viewer.path, relative or "index.html")
+        if target is None or not target.exists():
+            self._json({"error": f"not found: {relative}"}, 404)
+            return
+        self._file(target, _static_type(target.name) or "application/octet-stream")
+
+    def _serve_project_file(self, relative: str) -> None:
+        """Serve a file from the open project, so the viewer can fetch a .ply."""
+        project = self.session.project
+        if project is None:
+            self._json({"error": "no project is open"}, 404)
+            return
+        target = self._safe_join(project.root, relative)
+        if target is None or not target.exists():
+            self._json({"error": f"not found: {relative}"}, 404)
+            return
+        self._send(200, target.read_bytes(), "application/octet-stream")
+
     def _file(self, path: Path, content_type: str) -> None:
         if not path.exists():
             self._json({"error": f"not found: {path.name}"}, 404)
@@ -150,19 +197,40 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if route.path in ("/", "/index.html"):
                 self._file(STATIC / "index.html", "text/html; charset=utf-8")
-            elif route.path.endswith(".js"):
-                # Served as a module by index.html; the wrong MIME type makes the
-                # browser refuse the import outright.
+            elif route.path.startswith("/viewer/"):
+                # SuperSplat's own build, served from wherever it was found so the
+                # viewer can be embedded rather than launched separately.
+                self._serve_viewer(route.path[len("/viewer/"):])
+            elif route.path.startswith("/splat/"):
+                self._serve_project_file(route.path[len("/splat/"):])
+            elif route.path.startswith("/preview/"):
+                # Before the generic static handler: these are generated files in the
+                # session cache, and `.jpg` would otherwise be looked for in static/.
                 name = Path(route.path).name
-                self._file(STATIC / name, "text/javascript; charset=utf-8")
+                self._file(self.session.cache / name, "image/jpeg")
+            elif _static_type(route.path):
+                self._serve_static(route.path)
             elif route.path == "/api/presets":
                 self._json({"presets": {name: factory().to_dict()
                                         for name, factory in PRESETS.items()}})
             elif route.path == "/api/progress":
-                self._json(self.session.job.snapshot())
+                # Kept for the CLI-era clients and tests: report whichever stage is
+                # running, or capture's last state when nothing is.
+                running = self.session.jobs.any_running()
+                self._json((running or self.session.jobs["capture"]).snapshot(0))
             elif route.path == "/api/detect/status":
                 from ..mask import ml
                 self._json({"available": ml.available()})
+            elif route.path == "/api/jobs":
+                # Every stage at once, so the pipeline navigation can show a stage as
+                # running even while the user is looking at a different one.
+                self._json({
+                    "jobs": self.session.jobs.snapshot(
+                        log_limit=int(query.get("log", ["0"])[0])),
+                    "stages": stages.readiness(self.session.project),
+                })
+            elif route.path == "/api/system":
+                self._json({"tools": tool_survey()})
             elif route.path == "/api/project":
                 project = self.session.project
                 self._json({"project": self._project_payload(project)
@@ -194,6 +262,19 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.api_rig_load(payload))
             elif route.path == "/api/extract":
                 self._json(self.api_extract(payload))
+            elif route.path == "/api/job/cancel":
+                job = self.session.jobs[payload["stage"]]
+                job.cancel.set()
+                self._json({"cancelled": job.stage})
+            elif route.path == "/api/job/status":
+                self._json(self.session.jobs[payload["stage"]].snapshot(
+                    log_limit=int(payload.get("log", 400))))
+            elif route.path == "/api/reconstruct/run":
+                self._json(self._start("reconstruct", stages.run_reconstruction, payload))
+            elif route.path == "/api/train/run":
+                self._json(self._start("train", stages.run_training, payload))
+            elif route.path == "/api/inspect/clean":
+                self._json(self._start("inspect", stages.run_cleanup, payload))
             elif route.path == "/api/detect/frames":
                 self._json(self.api_detect_frames(payload))
             elif route.path == "/api/detect/preview":
@@ -221,11 +302,15 @@ class Handler(BaseHTTPRequestHandler):
             elif route.path == "/api/pick":
                 self._json(self.api_pick(payload))
             elif route.path == "/api/cancel":
-                self.session.job.cancel.set()
+                self.session.jobs.cancel_all()
                 self._json({"ok": True})
             else:
                 self._json({"error": "no such endpoint"}, 404)
-        except (FFmpegError, RigError, ProjectError, ValueError) as exc:
+        except AlreadyRunning as exc:
+            # Name what is running and where, so the UI can offer to go there rather
+            # than saying "something is already running" and leaving the user stuck.
+            self._json({"error": str(exc), "running_stage": exc.stage}, 409)
+        except (FFmpegError, RigError, ProjectError, stages.StageError, ValueError) as exc:
             self._json({"error": str(exc)}, 400)
         except Exception as exc:
             traceback.print_exc()
@@ -247,6 +332,13 @@ class Handler(BaseHTTPRequestHandler):
             "detect": asdict(project.detect),
             "stages": {name: project.status(name) for name in STAGES},
         }
+
+    def _start(self, stage: str, work, payload: dict) -> dict:
+        """Kick off a stage's job, with the project and settings bound in."""
+        project = self._open_project()
+        job = self.session.jobs[stage]
+        job.start(lambda j: work(j, project, payload), name="starting")
+        return {"started": True, "stage": stage}
 
     def _open_project(self) -> Project:
         if self.session.project is None:
@@ -320,9 +412,7 @@ class Handler(BaseHTTPRequestHandler):
         from ..mask import dynamic, ml
 
         project = self._open_project()
-        job = self.session.job
-        if job.state == "running":
-            raise ValueError("something is already running")
+        job = self.session.jobs["refine"]
         if not ml.available():
             raise ValueError('dynamic masking needs the ML extra: pip install -e ".[ml]"')
 
@@ -337,30 +427,29 @@ class Handler(BaseHTTPRequestHandler):
         project.save()
         session = self.session
 
-        def work() -> None:
-            job.cancel.clear()
-            job.update(state="running", message="loading the model", fraction=0.0)
-            try:
-                backend = ml.make_backend(
-                    settings.backend, classes=settings.classes,
-                    confidence=settings.confidence, dilate=settings.dilate,
-                    device=settings.device)
-                report = dynamic.run(
-                    session.ffmpeg, project.root, project.rig, backend,
-                    fuse=settings.fuse,
-                    on_progress=lambda note: job.update(message=note))
-                project.mark_done("mask", masks=report.masks_written,
-                                  detections=report.detections)
-                project.save()
-                job.update(state="done", fraction=1.0, message=report.summary(),
-                           images=report.masks_written)
-            except Exception as exc:
-                traceback.print_exc()
-                job.update(state="error", message=str(exc))
+        def work(running_job) -> dict:
+            running_job.update(message="loading the model")
+            backend = ml.make_backend(
+                settings.backend, classes=settings.classes,
+                confidence=settings.confidence, dilate=settings.dilate,
+                device=settings.device)
 
-        job.thread = threading.Thread(target=work, daemon=True)
-        job.thread.start()
-        return {"started": True}
+            report = dynamic.run(
+                session.ffmpeg, project.root, project.rig, backend,
+                fuse=settings.fuse,
+                on_progress=lambda note: running_job.log(note),
+                on_fraction=lambda done, total, message:
+                    running_job.progress(done / max(total, 1e-9), message),
+                should_cancel=running_job.cancel.is_set,
+            )
+            project.mark_done("mask", masks=report.masks_written,
+                              detections=report.detections)
+            project.save()
+            return {"masks": report.masks_written, "detections": report.detections,
+                    "summary": report.summary()}
+
+        job.start(work, name="detecting")
+        return {"started": True, "stage": "refine"}
 
     def api_export_colmap(self, payload: dict) -> dict:
         """Write rig_config.json, intrinsics and the command list for the open project."""
@@ -698,10 +787,7 @@ class Handler(BaseHTTPRequestHandler):
         return {"rig": Rig.load(payload["path"]).to_dict()}
 
     def api_extract(self, payload: dict) -> dict:
-        job = self.session.job
-        if job.state == "running":
-            raise ValueError("an extraction is already running")
-
+        job = self.session.jobs["capture"]
         rig = rig_from_payload(payload["rig"])
         sources = payload["sources"]
         if not sources:
@@ -716,58 +802,41 @@ class Handler(BaseHTTPRequestHandler):
         output_dir = payload.get("output_dir") or "dataset"
         session = self.session
 
-        def work() -> None:
-            job.cancel.clear()
-            job.update(state="running", message="starting", fraction=0.0, images=0)
+        def work(running_job) -> dict:
             total = 0
-            try:
-                for index, source in enumerate(sources):
-                    if job.cancel.is_set():
-                        job.update(state="cancelled", message="cancelled")
-                        return
-                    info = probe_media(source, session.ffmpeg)
-                    if selection.mode == "sharp" and info.is_video:
-                        job.update(message=f"{info.path.name}: analysing sharpness…")
-                    plan = plan_extraction(
-                        info, rig, selection, output_dir,
-                        resume=bool(payload.get("resume", True)),
-                        ffmpeg=session.ffmpeg,
-                        on_analysis=lambda note: job.update(message=note),
-                        mask_mode=payload.get("mask_mode", "sidecar"),
-                    )
-                    if not plan.passes:
-                        job.update(message=f"{info.path.name}: already extracted")
-                        continue
+            for index, source in enumerate(sources):
+                running_job.raise_if_cancelled()
+                info = probe_media(source, session.ffmpeg)
+                if selection.mode == "sharp" and info.is_video:
+                    running_job.update(message=f"{info.path.name}: analysing sharpness…")
 
-                    def report(progress, index=index, info=info):
-                        if job.cancel.is_set():
-                            raise KeyboardInterrupt
-                        overall = (index + progress.fraction) / len(sources)
-                        job.update(
-                            fraction=overall,
-                            message=f"{info.path.name}: pass "
-                                    f"{progress.pass_index + 1}/{progress.pass_count}, "
-                                    f"frame {progress.frame}",
-                        )
+                plan = plan_extraction(
+                    info, rig, selection, output_dir,
+                    resume=bool(payload.get("resume", True)),
+                    ffmpeg=session.ffmpeg,
+                    on_analysis=lambda note: running_job.log(note),
+                    mask_mode=payload.get("mask_mode", "sidecar"),
+                )
+                if not plan.passes:
+                    running_job.log(f"{info.path.name}: already extracted")
+                    continue
 
-                    result = run_extraction(plan, session.ffmpeg, on_progress=report)
-                    if result.cancelled:
-                        job.update(state="cancelled", message="cancelled")
-                        return
-                    total += result.images_written
-                    job.update(images=total)
+                def report(progress, index=index, info=info):
+                    running_job.progress(
+                        (index + progress.fraction) / len(sources),
+                        f"pass {progress.pass_index + 1} / {progress.pass_count}"
+                        f"  ·  frame {progress.frame}",
+                        detail=info.path.name)
 
-                job.update(state="done", fraction=1.0,
-                           message=f"{total} images written to {output_dir}")
-            except KeyboardInterrupt:
-                job.update(state="cancelled", message="cancelled")
-            except Exception as exc:
-                traceback.print_exc()
-                job.update(state="error", message=str(exc))
+                result = run_extraction(plan, session.ffmpeg, on_progress=report)
+                total += result.images_written
+                running_job.log(f"{info.path.name}: {result.images_written} images")
 
-        job.thread = threading.Thread(target=work, daemon=True)
-        job.thread.start()
-        return {"started": True}
+            return {"images": total,
+                    "summary": f"{total} images written to {output_dir}"}
+
+        job.start(work, name="extracting")
+        return {"started": True, "stage": "capture"}
 
 
 def serve(host: str = "127.0.0.1", port: int = 8360, open_browser: bool = True,

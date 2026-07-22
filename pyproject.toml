@@ -45,5 +45,6 @@ markers = [
   "ffmpeg: requires a working ffmpeg with the v360 filter",
   "slow: runs a real detection model, and may download weights",
   "colmap: requires COLMAP 3.12+ with rig support on the machine",
+  "ui: drives the web interface in a real browser via Playwright",
 ]
 

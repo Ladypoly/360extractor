@@ -1,0 +1,67 @@
+/* Design tokens.
+ *
+ * One place for every colour, size and radius in the application. Scattering literal
+ * values through the CSS is how an interface drifts into looking like several
+ * different tools stitched together, which is precisely what this redesign is undoing.
+ *
+ * The palette is dark and deliberately quiet: the panorama, the masks and the splat
+ * are the subject, and the chrome around them should not compete with it.
+ */
+
+:root {
+  /* Surfaces, from furthest back to nearest front. */
+  --app-bg:        #0d0f12;   /* application background, very dark graphite */
+  --workspace-bg:  #08090b;   /* almost black, so images sit against nothing */
+  --panel-bg:      #14171c;
+  --panel-raised:  #1a1e24;
+  --control-bg:    #1f242b;
+  --control-hover: #262c34;
+
+  --border:        #262b33;
+  --border-strong: #333a44;
+
+  --text:          #e4e8ee;
+  --text-dim:      #97a0ad;
+  --text-faint:    #6b7481;
+  --text-disabled: #4b535e;
+
+  /* Status. Never the only signal -- every state also carries an icon. */
+  --accent:        #4da3ff;
+  --accent-dim:    #2a6bb0;
+  --accent-tint:   rgba(77, 163, 255, 0.13);
+  --running:       #45b8e8;
+  --success:       #5ecb8b;
+  --warning:       #e8b054;
+  --error:         #f06a6a;
+  --occluder:      #ff8c1a;
+
+  /* Spacing: an 8px system, with 4 for tightly bound things. */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s6: 24px;
+  --s8: 32px;
+
+  /* Radii, kept modest. */
+  --radius-control: 5px;
+  --radius-panel:   7px;
+
+  /* Fixed chrome. */
+  --topbar-h:   52px;
+  --pipeline-h: 56px;
+  --actionbar-h: 56px;
+  --inspector-w: 320px;
+
+  --font: ui-sans-serif, system-ui, "Segoe UI", Inter, sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+
+  --fs-title: 15px;
+  --fs-stage: 13px;
+  --fs-head:  12px;
+  --fs-body:  12.5px;
+  --fs-meta:  11.5px;
+
+  --shadow-panel: 0 2px 10px rgba(0, 0, 0, 0.35);
+  --focus-ring: 0 0 0 2px var(--app-bg), 0 0 0 4px var(--accent);
+}

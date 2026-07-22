@@ -106,8 +106,20 @@ def discover(root: Path, rig: Rig) -> list[CameraImages]:
 
 def run(ffmpeg: FFmpegInfo, root: Path, rig: Rig, backend,
         fuse: bool = True, static: bool = True,
-        on_progress=None) -> DynamicReport:
-    """Detect, optionally reconcile, and write masks for an extracted dataset."""
+        on_progress=None, on_fraction=None, should_cancel=None) -> DynamicReport:
+    """Detect, optionally reconcile, and write masks for an extracted dataset.
+
+    `on_fraction(done, total, message)` reports genuine progress. Without it the UI can
+    only show a bar sitting at zero for the whole run, which reads as a hang -- the
+    exact complaint that prompted this. `should_cancel()` is checked between frames, so
+    a long detection can be stopped without killing the process.
+    """
+    def cancelled() -> bool:
+        return bool(should_cancel and should_cancel())
+
+    def report(done: int, total: int, message: str) -> None:
+        if on_fraction:
+            on_fraction(done, total, message)
     numpy = fuse_module._numpy()
     root = Path(root)
     cameras = discover(root, rig)
@@ -121,17 +133,29 @@ def run(ffmpeg: FFmpegInfo, root: Path, rig: Rig, backend,
     # 1. Detect per camera, writing tile masks out so fusion can work frame by frame
     #    without holding every mask for every camera in memory at once.
     tiles: dict[str, dict[int, Path]] = {}
+    # Detection is roughly three quarters of the work; fusion and writing share the
+    # rest. Splitting it this way keeps the bar moving at a believable rate throughout.
+    total_images = sum(len(entry.frames) for entry in cameras)
+    done_images = 0
+
     for entry in cameras:
+        if cancelled():
+            return report
         ordered = [entry.frames[n] for n in sorted(entry.frames)]
         if on_progress:
             on_progress(f"detecting in {entry.camera.name} ({len(ordered)} frames)")
 
-        results = backend.detect(ordered)
         camera_dir = workdir / entry.camera.name
         camera_dir.mkdir(parents=True, exist_ok=True)
-
         tiles[entry.camera.name] = {}
-        for image, frame in zip(ordered, results):
+
+        # One image at a time so progress and cancellation are per frame rather than
+        # per camera; a camera can be hundreds of frames.
+        for position, image in enumerate(ordered):
+            if cancelled():
+                return report
+            frame = backend.detect([image])[0]
+
             report.images += 1
             report.detections += frame.found
             for detection in frame.detections:
@@ -142,14 +166,27 @@ def run(ffmpeg: FFmpegInfo, root: Path, rig: Rig, backend,
             fuse_module.write_gray(ffmpeg, frame.mask, target)
             tiles[entry.camera.name][number] = target
 
+            done_images += 1
+            report_message = (f"{entry.camera.name}  frame {position + 1} / "
+                              f"{len(ordered)}  ·  overall {done_images} / {total_images}")
+            report_fraction = 0.75 * done_images / max(total_images, 1)
+            if on_fraction:
+                on_fraction(report_fraction, 1.0, report_message)
+
     # 2. Reconcile overlapping cameras, if asked. A pedestrian seen by two cameras and
     #    caught by only one would otherwise be masked in one and trained on in the other.
     if fuse and len(cameras) > 1:
         numbers = sorted(set().union(*(set(t) for t in tiles.values())))
         height = FUSION_WIDTH // 2
         for position, number in enumerate(numbers):
+            if cancelled():
+                return report
             if on_progress and position % 10 == 0:
                 on_progress(f"reconciling frame {position + 1}/{len(numbers)}")
+            if on_fraction:
+                on_fraction(0.75 + 0.15 * (position / max(len(numbers), 1)), 1.0,
+                            f"reconciling cameras  ·  frame {position + 1} / "
+                            f"{len(numbers)}")
 
             present = [(entry.camera, tiles[entry.camera.name][number])
                        for entry in cameras if number in tiles[entry.camera.name]]
@@ -169,9 +206,16 @@ def run(ffmpeg: FFmpegInfo, root: Path, rig: Rig, backend,
 
     # 3. Write the final masks, combining with the static occluder where present.
     static_masks = _static_masks(ffmpeg, rig, cameras, root) if static else {}
+    written = 0
     for entry in cameras:
+        if cancelled():
+            return report
         entry.mask_directory.mkdir(parents=True, exist_ok=True)
         for number, image in sorted(entry.frames.items()):
+            written += 1
+            if on_fraction and written % 5 == 0:
+                on_fraction(0.90 + 0.10 * (written / max(total_images, 1)), 1.0,
+                            f"writing masks  ·  {written} / {total_images}")
             tile = tiles[entry.camera.name].get(number)
             if tile is None:
                 continue

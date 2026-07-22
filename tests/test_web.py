@@ -62,7 +62,20 @@ class TestStatic:
         status, body, content_type = get(ui, "/")
         assert status == 200
         assert "text/html" in content_type
-        assert b"<canvas" in body
+        # The shell is a mount point; every workspace, including the panorama canvas,
+        # is built by the stage modules. See tests/test_ui.py for the rendered page.
+        assert b'id="panels"' in body
+        assert b'src="/js/app.js"' in body
+
+    def test_serves_the_stylesheets_and_modules(self, ui):
+        for path, expected in [("/css/tokens.css", "text/css"),
+                               ("/js/app.js", "text/javascript"),
+                               ("/js/stages/capture.js", "text/javascript")]:
+            status, body, content_type = get(ui, path)
+            assert status == 200, path
+            # A module served as the wrong type is refused outright by the browser.
+            assert expected in content_type, path
+            assert body
 
     def test_unknown_endpoint_is_404_json(self, ui):
         with pytest.raises(urllib.error.HTTPError) as info:
@@ -197,12 +210,13 @@ class TestExtraction:
         while time.monotonic() < deadline:
             _, data, _ = get(ui, "/api/progress")
             progress = json.loads(data)
-            if progress["state"] not in ("running", "idle"):
+            if progress["state"] not in ("running", "pending"):
                 break
             time.sleep(0.2)
 
         assert progress["state"] == "done", progress
-        assert progress["images"] == 4
+        # Counts moved into the job's result when jobs became per-stage.
+        assert progress["result"]["images"] == 4
         assert progress["fraction"] == 1.0
 
     def test_rejects_extraction_with_no_sources(self, ui):
