@@ -6,200 +6,265 @@
 <title>360extract</title>
 <style>
   :root {
-    --bg: #14161a; --panel: #1c1f26; --line: #2c313b; --text: #dfe3ea;
-    --muted: #8b93a3; --accent: #4da3ff; --warn: #ffb454; --bad: #ff6b6b;
-    --good: #5ecb8b;
+    --bg: #14161a; --panel: #1b1e24; --sunk: #23272f; --line: #2c313b;
+    --text: #dfe3ea; --muted: #8b93a3; --accent: #4da3ff; --warn: #ffb454;
+    --bad: #ff6b6b; --good: #5ecb8b;
   }
   * { box-sizing: border-box; }
+  html, body { height: 100%; }
   body {
     margin: 0; background: var(--bg); color: var(--text);
-    font: 13px/1.5 ui-sans-serif, system-ui, "Segoe UI", sans-serif;
-    display: grid; grid-template-rows: auto 1fr; height: 100vh; overflow: hidden;
+    font: 13px/1.55 ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+    display: grid; grid-template-rows: auto 1fr auto; height: 100vh; overflow: hidden;
   }
+
   header {
-    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
-    padding: 10px 14px; background: var(--panel); border-bottom: 1px solid var(--line);
+    display: flex; gap: 8px; align-items: center;
+    padding: 9px 14px; background: var(--panel); border-bottom: 1px solid var(--line);
   }
-  header h1 { font-size: 14px; margin: 0 12px 0 0; font-weight: 600; letter-spacing: .3px; }
-  main { display: grid; grid-template-columns: 1fr 340px; min-height: 0; }
-  #left { display: grid; grid-template-rows: 1fr auto; min-height: 0; min-width: 0; }
-  #stage { position: relative; overflow: auto; padding: 12px; min-height: 0; }
-  canvas { display: block; max-width: 100%; background: #0d0f12; border: 1px solid var(--line); cursor: crosshair; }
+  header h1 { font-size: 13px; margin: 0 10px 0 0; font-weight: 600; letter-spacing: .4px; }
+  #path { flex: 1; min-width: 0; font-size: 12px; }
+
+  main { display: grid; grid-template-columns: 1fr 312px; min-height: 0; }
+
+  /* Canvas is centred in whatever space is left and scaled to fit, never cropped. */
+  #stage {
+    display: flex; align-items: center; justify-content: center;
+    padding: 16px; min-height: 0; min-width: 0; overflow: hidden;
+  }
+  canvas {
+    display: block; max-width: 100%; max-height: 100%;
+    background: #0d0f12; border: 1px solid var(--line); border-radius: 3px;
+    cursor: grab; box-shadow: 0 6px 26px rgba(0,0,0,.45);
+  }
+  canvas.dragging { cursor: grabbing; }
+
   aside {
     background: var(--panel); border-left: 1px solid var(--line);
-    overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 14px;
+    overflow-y: auto; overflow-x: hidden;
   }
-  section > h2 {
-    font-size: 11px; text-transform: uppercase; letter-spacing: .09em;
-    color: var(--muted); margin: 0 0 8px; font-weight: 600;
+  section { border-bottom: 1px solid var(--line); padding: 11px 13px; }
+  section:last-child { border-bottom: 0; }
+  h2 {
+    font-size: 10px; text-transform: uppercase; letter-spacing: .1em;
+    color: var(--muted); margin: 0 0 9px; font-weight: 600;
+    display: flex; justify-content: space-between; align-items: baseline;
   }
+  h2 .note { text-transform: none; letter-spacing: 0; font-weight: 400; }
+
   input, select, button {
-    background: #23272f; color: var(--text); border: 1px solid var(--line);
-    border-radius: 5px; padding: 5px 8px; font: inherit; font-size: 12px;
+    background: var(--sunk); color: var(--text); border: 1px solid var(--line);
+    border-radius: 5px; padding: 5px 7px; font: inherit; font-size: 12px;
   }
-  input[type=range] { padding: 0; }
-  button { cursor: pointer; }
-  button:hover:not(:disabled) { border-color: var(--accent); }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  button { cursor: pointer; white-space: nowrap; }
+  button:hover:not(:disabled) { border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .4; cursor: default; }
   button.primary { background: var(--accent); color: #06121f; border-color: var(--accent); font-weight: 600; }
-  button:disabled { opacity: .45; cursor: default; }
-  #path { flex: 1; min-width: 260px; }
-  table { width: 100%; border-collapse: collapse; font-size: 12px; }
-  th { color: var(--muted); font-weight: 500; text-align: right; padding: 2px 3px; font-size: 10px; }
-  th:first-child, td:first-child { text-align: left; }
-  td { padding: 1px 3px; }
-  td input[type=number] { width: 100%; padding: 3px 4px; text-align: right; }
-  td input[type=text] { width: 100%; padding: 3px 4px; }
-  tr.sel td { background: #26303d; }
-  tr.off { opacity: .45; }
-  .swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
-  .row { display: flex; gap: 6px; align-items: center; }
-  .row > label { color: var(--muted); min-width: 62px; font-size: 11px; }
-  .row > input, .row > select { flex: 1; min-width: 0; }
-  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-  #footer { border-top: 1px solid var(--line); background: var(--panel); padding: 10px 14px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-  #bar { flex: 1; min-width: 160px; height: 7px; background: #23272f; border-radius: 4px; overflow: hidden; }
-  #barfill { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
-  #status { color: var(--muted); font-size: 12px; }
+  button.ghost { background: none; }
+  input[type=range] { padding: 0; accent-color: var(--accent); }
+  input[type=number], input[type=text] { width: 100%; }
+
+  .field { display: flex; gap: 7px; align-items: center; margin-bottom: 6px; }
+  .field > label { color: var(--muted); flex: 0 0 58px; font-size: 11px; }
+  .field > :not(label) { flex: 1; min-width: 0; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+  .pair .field > label { flex-basis: 40px; }
+
+  /* Camera list: one calm row each. Editing happens below, not inline. */
+  #camlist { display: flex; flex-direction: column; gap: 2px; margin-bottom: 8px; }
+  .cam {
+    display: flex; align-items: center; gap: 8px; padding: 5px 7px;
+    border-radius: 5px; cursor: pointer; border: 1px solid transparent;
+  }
+  .cam:hover { background: #21252d; }
+  .cam.sel { background: #263243; border-color: var(--accent); }
+  .cam.off .camname, .cam.off .camaim { opacity: .38; text-decoration: line-through; }
+  .dot { width: 10px; height: 10px; border-radius: 3px; flex: 0 0 auto; }
+  .camname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .camaim { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .camocc {
+    font-size: 10px; padding: 1px 5px; border-radius: 8px;
+    background: rgba(255,180,84,.16); color: var(--warn); font-variant-numeric: tabular-nums;
+  }
+  .cam input[type=checkbox] { margin: 0; flex: 0 0 auto; accent-color: var(--accent); }
+
+  #editor { background: var(--sunk); border-radius: 6px; padding: 9px; margin-top: 2px; }
+  #editor .field > label { flex-basis: 46px; }
+  .slider { display: flex; gap: 7px; align-items: center; }
+  .slider input[type=range] { flex: 1; }
+  .slider output {
+    flex: 0 0 46px; text-align: right; color: var(--muted);
+    font-size: 11px; font-variant-numeric: tabular-nums;
+  }
+
+  footer {
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+    padding: 9px 14px; background: var(--panel); border-top: 1px solid var(--line);
+  }
+  #bar { flex: 1; min-width: 120px; height: 6px; background: var(--sunk); border-radius: 4px; overflow: hidden; }
+  #barfill { height: 100%; width: 0; background: var(--accent); transition: width .25s; }
+  #status { font-size: 12px; color: var(--muted); max-width: 46vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .hint { color: var(--muted); font-size: 11px; margin: 7px 0 0; }
   .warn { color: var(--warn); } .bad { color: var(--bad); } .good { color: var(--good); }
-  #campreview { max-width: 100%; border: 1px solid var(--line); border-radius: 4px; display: none; }
-  .hint { color: var(--muted); font-size: 11px; margin: 6px 0 0; }
-  .occ { color: var(--warn); font-variant-numeric: tabular-nums; font-size: 11px; }
+  #campreview { width: 100%; border-radius: 4px; border: 1px solid var(--line); display: none; }
+  #res { font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
 
 <header>
   <h1>360extract</h1>
-  <input id="path" placeholder="path to a 360 video or still, e.g. C:\captures\clip.mp4">
-  <button id="load">Load</button>
-  <span id="media" class="hint"></span>
+  <input id="path" placeholder="no source loaded — click Browse" readonly>
+  <button id="browse" class="primary">Browse…</button>
+  <span id="media" class="hint" style="margin:0"></span>
 </header>
 
 <main>
-  <div id="left">
-    <div id="stage"><canvas id="canvas" width="1600" height="800"></canvas></div>
-    <div id="footer">
-      <label class="hint" for="time">frame</label>
-      <input type="range" id="time" min="0" max="0" step="0.1" value="0" style="width:170px">
-      <span id="timelabel" class="hint">0.0s</span>
-      <span style="flex:1"></span>
-      <div id="bar"><div id="barfill"></div></div>
-      <span id="status">idle</span>
-      <button id="extract" class="primary">Extract</button>
-      <button id="cancel" disabled>Cancel</button>
-    </div>
-  </div>
+  <div id="stage"><canvas id="canvas" width="1600" height="800"></canvas></div>
 
   <aside>
     <section>
-      <h2>Rig</h2>
-      <div class="row">
-        <select id="preset">
-          <option value="">preset…</option>
-        </select>
-        <button id="applypreset">Load</button>
+      <h2>Rig <span class="note" id="camcount"></span></h2>
+      <div class="field">
+        <select id="preset"></select>
+        <button id="applypreset" style="flex:0 0 auto">Use</button>
       </div>
-      <div class="row" style="margin-top:6px">
-        <input id="rigpath" placeholder="rigs/my-rig.json">
-        <button id="saverig">Save</button>
-        <button id="loadrig">Open</button>
+      <div class="field" style="margin-bottom:0">
+        <button id="loadrig" class="ghost">Open rig…</button>
+        <button id="saverig" class="ghost">Save rig…</button>
       </div>
     </section>
 
     <section>
-      <h2>Cameras <span id="camcount" class="hint"></span></h2>
-      <table id="cams">
-        <thead><tr>
-          <th>name</th><th>yaw</th><th>pitch</th><th>h&deg;</th><th>v&deg;</th><th>on</th><th></th>
-        </tr></thead>
-        <tbody></tbody>
-      </table>
-      <div class="row" style="margin-top:6px">
-        <button id="addcam">Add camera</button>
-        <button id="dupcam">Duplicate</button>
+      <h2>Cameras</h2>
+      <div id="camlist"></div>
+      <div class="field" style="margin-bottom:0">
+        <button id="addcam" class="ghost">Add</button>
+        <button id="dupcam" class="ghost">Duplicate</button>
+        <button id="delcam" class="ghost">Remove</button>
       </div>
-      <p class="hint">Drag a footprint on the panorama to aim a camera.</p>
+
+      <div id="editor">
+        <div class="field">
+          <label for="cname">name</label>
+          <input type="text" id="cname">
+        </div>
+        <div class="field">
+          <label for="cyaw">yaw</label>
+          <div class="slider">
+            <input type="range" id="cyaw" min="-180" max="180" step="1">
+            <output id="cyawv"></output>
+          </div>
+        </div>
+        <div class="field">
+          <label for="cpitch">pitch</label>
+          <div class="slider">
+            <input type="range" id="cpitch" min="-90" max="90" step="1">
+            <output id="cpitchv"></output>
+          </div>
+        </div>
+        <div class="field">
+          <label for="cfov">fov</label>
+          <div class="slider">
+            <input type="range" id="cfov" min="20" max="150" step="1">
+            <output id="cfovv"></output>
+          </div>
+        </div>
+        <div class="field" style="margin-bottom:0">
+          <label for="caspect">shape</label>
+          <select id="caspect">
+            <option value="1.3333">4:3</option>
+            <option value="1.5">3:2</option>
+            <option value="1.7778">16:9</option>
+            <option value="1">square</option>
+          </select>
+        </div>
+        <p class="hint" id="res"></p>
+      </div>
     </section>
 
     <section>
-      <h2>Occluder guide</h2>
-      <div class="row">
-        <label for="nadir">nadir</label>
-        <input type="range" id="nadir" min="0" max="89" step="1" value="0">
-        <span id="nadirval" class="hint" style="min-width:34px">off</span>
-      </div>
+      <h2>Occluder guide <span class="note" id="nadirval">off</span></h2>
+      <input type="range" id="nadir" min="0" max="89" step="1" value="0" style="width:100%">
       <p class="hint">
-        Shades everything below the given angle &mdash; the stick, tripod, or car roof.
-        The <span class="occ">%</span> column shows how much of each camera falls inside it.
-        This is a design guide: mask generation lands in M2.
+        Shades everything below the angle — the stick, tripod or car roof — and badges each
+        camera with how much of it falls inside. A design aid; masking arrives in M2.
       </p>
     </section>
 
     <section>
-      <h2>Rig orientation</h2>
-      <div class="grid2">
-        <div class="row"><label for="oyaw">yaw</label><input type="number" id="oyaw" value="0" step="1"></div>
-        <div class="row"><label for="opitch">pitch</label><input type="number" id="opitch" value="0" step="1"></div>
-      </div>
-      <p class="hint">Levels a tilted mount without editing every camera.</p>
-    </section>
-
-    <section>
       <h2>Output</h2>
-      <div class="grid2">
-        <div class="row"><label for="ow">width</label><input type="number" id="ow" value="1920" step="16"></div>
-        <div class="row"><label for="oh">height</label><input type="number" id="oh" value="1440" step="16"></div>
+      <div class="field">
+        <label for="outdir">folder</label>
+        <input type="text" id="outdir" placeholder="chosen with the source">
+        <button id="browseout" class="ghost" style="flex:0 0 auto">…</button>
       </div>
-      <div class="grid2" style="margin-top:6px">
-        <div class="row"><label for="ofmt">format</label>
+      <div class="pair">
+        <div class="field"><label for="ofmt">format</label>
           <select id="ofmt"><option>jpg</option><option>png</option></select></div>
-        <div class="row"><label for="oq">quality</label><input type="number" id="oq" value="2" min="1" max="31"></div>
+        <div class="field"><label for="oq">quality</label>
+          <input type="number" id="oq" value="2" min="1" max="31"></div>
       </div>
-      <div class="row" style="margin-top:6px">
-        <label for="outdir">folder</label><input id="outdir" value="dataset">
+      <div class="field">
+        <label for="mode">frames</label>
+        <select id="mode">
+          <option value="sharp">sharpest per second</option>
+          <option value="fps">every N per second</option>
+          <option value="every">every Nth frame</option>
+          <option value="all">all frames</option>
+        </select>
       </div>
-      <div class="grid2" style="margin-top:6px">
-        <div class="row"><label for="mode">frames</label>
-          <select id="mode">
-            <option value="fps">per second</option>
-            <option value="every">every Nth</option>
-            <option value="all">all</option>
-          </select></div>
-        <div class="row"><label for="modeval">value</label><input type="number" id="modeval" value="2" step="0.5" min="0.1"></div>
+      <div class="field" id="modevalrow">
+        <label for="modeval">rate</label>
+        <input type="number" id="modeval" value="2" step="0.5" min="0.1">
       </div>
-      <p id="estimate" class="hint"></p>
-      <p id="warnings" class="hint warn"></p>
+      <p class="hint" id="estimate"></p>
+      <p class="hint warn" id="warnings"></p>
     </section>
 
     <section>
-      <h2>Selected camera</h2>
-      <img id="campreview" alt="camera preview">
-      <p class="hint">Exactly what this camera will extract.</p>
+      <h2>Rig orientation <span class="note">levels a tilted mount</span></h2>
+      <div class="pair">
+        <div class="field" style="margin:0"><label for="oyaw">yaw</label>
+          <input type="number" id="oyaw" value="0" step="1"></div>
+        <div class="field" style="margin:0"><label for="opitch">pitch</label>
+          <input type="number" id="opitch" value="0" step="1"></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Preview <span class="note">what this camera extracts</span></h2>
+      <img id="campreview" alt="">
     </section>
   </aside>
 </main>
+
+<footer>
+  <label class="hint" for="time" style="margin:0">frame</label>
+  <input type="range" id="time" min="0" max="0" step="0.1" value="0" style="width:150px">
+  <span id="timelabel" class="hint" style="margin:0">0.0s</span>
+  <div id="bar"><div id="barfill"></div></div>
+  <span id="status">idle</span>
+  <button id="cancel" disabled>Cancel</button>
+  <button id="extract" class="primary">Extract</button>
+</footer>
 
 <script type="module">
 "use strict";
 
 import { footprint, occlusionFraction } from "./geometry.js";
 
-// ---------------------------------------------------------------- state
-
 const state = {
   media: null,
-  previewUrl: null,
   image: null,
-  rig: {
-    version: 1, name: "rig",
-    orientation: { yaw: 0, pitch: 0, roll: 0 },
-    output: { width: 1920, height: 1440, format: "jpg", quality: 2, interp: "line" },
-    cameras: [],
-    occluders: [],
-  },
+  presets: {},
+  rig: null,
   selected: 0,
   nadir: 0,
   dragging: null,
+  outdirTouched: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -209,11 +274,12 @@ const ctx = canvas.getContext("2d");
 const PALETTE = ["#4da3ff","#5ecb8b","#ffb454","#ff6b6b","#c58aff","#4fd8d8",
                  "#ff8ac4","#b7d24d","#7f9cff","#ffd166"];
 const colorOf = (i) => PALETTE[i % PALETTE.length];
+const current = () => state.rig.cameras[state.selected];
 
 async function api(path, body) {
-  const options = body === undefined
-    ? {} : { method: "POST", headers: { "Content-Type": "application/json" },
-             body: JSON.stringify(body) };
+  const options = body === undefined ? {}
+    : { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body) };
   const response = await fetch(path, options);
   const data = await response.json();
   if (!response.ok || data.error) throw new Error(data.error || response.statusText);
@@ -221,12 +287,23 @@ async function api(path, body) {
 }
 
 function setStatus(text, cls) {
-  const el = $("status");
-  el.textContent = text;
-  el.className = cls || "";
+  $("status").textContent = text;
+  $("status").className = cls || "";
+  $("status").title = text;
 }
 
-// ------------------------------------------------------------- drawing
+// ------------------------------------------------------------ canvas fit
+
+/** Size the backing store to the panorama, and let CSS scale it to the stage. */
+function fitCanvas() {
+  const source = state.media;
+  const width = 1600;
+  const height = Math.round(width / (source && source.aspect ? source.aspect : 2));
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width; canvas.height = height;
+  }
+  draw();
+}
 
 function draw() {
   const W = canvas.width, H = canvas.height;
@@ -236,31 +313,29 @@ function draw() {
     ctx.drawImage(state.image, 0, 0, W, H);
   } else {
     ctx.fillStyle = "#0d0f12"; ctx.fillRect(0, 0, W, H);
-    ctx.fillStyle = "#4a5261"; ctx.font = "15px sans-serif"; ctx.textAlign = "center";
-    ctx.fillText("Load a 360 video or still to begin", W/2, H/2);
+    ctx.fillStyle = "#4a5261"; ctx.font = "16px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("Click Browse… to load a 360 video or still", W/2, H/2);
     ctx.textAlign = "left";
   }
 
-  // Horizon and cardinal bearings.
-  ctx.strokeStyle = "rgba(255,255,255,.22)"; ctx.lineWidth = 1;
+  ctx.strokeStyle = "rgba(255,255,255,.2)"; ctx.lineWidth = 1;
   ctx.beginPath(); ctx.moveTo(0, H/2); ctx.lineTo(W, H/2); ctx.stroke();
-  ctx.fillStyle = "rgba(255,255,255,.4)"; ctx.font = "11px sans-serif";
+  ctx.fillStyle = "rgba(255,255,255,.38)"; ctx.font = "11px sans-serif";
   for (let yaw = -180; yaw <= 180; yaw += 45) {
     const x = (yaw + 180) / 360 * W;
-    ctx.beginPath(); ctx.moveTo(x, H/2 - 6); ctx.lineTo(x, H/2 + 6); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x, H/2 - 5); ctx.lineTo(x, H/2 + 5); ctx.stroke();
     ctx.fillText(yaw + "°", x + 3, H/2 - 8);
   }
 
-  // Nadir occluder guide.
   if (state.nadir > 0) {
     const y = (90 + state.nadir) / 180 * H;
-    ctx.fillStyle = "rgba(255,180,84,.20)";
+    ctx.fillStyle = "rgba(255,180,84,.18)";
     ctx.fillRect(0, y, W, H - y);
-    ctx.strokeStyle = "rgba(255,180,84,.75)"; ctx.setLineDash([6, 4]);
+    ctx.strokeStyle = "rgba(255,180,84,.7)"; ctx.setLineDash([6, 4]);
     ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
     ctx.setLineDash([]);
     ctx.fillStyle = "rgba(255,180,84,.9)";
-    ctx.fillText("occluded below −" + state.nadir + "°", 6, y - 5);
+    ctx.fillText("occluded below −" + state.nadir + "°", 7, y - 6);
   }
 
   state.rig.cameras.forEach((camera, index) => {
@@ -276,96 +351,123 @@ function draw() {
         i ? ctx.lineTo(x, p.y) : ctx.moveTo(x, p.y);
       });
       ctx.closePath();
-      ctx.fillStyle = color + (isSelected ? "3a" : "1c");
+      ctx.fillStyle = color + (isSelected ? "38" : "18");
       ctx.fill();
       ctx.strokeStyle = color;
       ctx.lineWidth = isSelected ? 2.5 : 1.2;
       ctx.stroke();
     }
 
-    const a = { yaw: camera.yaw + state.rig.orientation.yaw,
-                pitch: camera.pitch + state.rig.orientation.pitch };
-    let cx = ((((a.yaw + 180) % 360) + 360) % 360) / 360 * W;
-    const cy = (90 - a.pitch) / 180 * H;
+    const yaw = camera.yaw + state.rig.orientation.yaw;
+    const pitch = camera.pitch + state.rig.orientation.pitch;
+    const cx = ((((yaw + 180) % 360) + 360) % 360) / 360 * W;
+    const cy = (90 - pitch) / 180 * H;
     ctx.fillStyle = color;
     ctx.beginPath(); ctx.arc(cx, cy, isSelected ? 5 : 3.5, 0, 7); ctx.fill();
     ctx.font = (isSelected ? "bold " : "") + "12px sans-serif";
-    ctx.fillText(camera.name, cx + 8, cy - 7);
+    ctx.fillText(camera.name, cx + 9, cy - 8);
   });
 }
 
-// ------------------------------------------------------------ rig table
+// ------------------------------------------------------------- camera UI
+
+let sizes = {};
 
 function renderCameras() {
-  const body = document.querySelector("#cams tbody");
-  body.innerHTML = "";
+  const list = $("camlist");
+  list.innerHTML = "";
 
   state.rig.cameras.forEach((camera, index) => {
-    const tr = document.createElement("tr");
-    tr.className = (index === state.selected ? "sel " : "") + (camera.enabled ? "" : "off");
+    const row = document.createElement("div");
+    row.className = "cam" + (index === state.selected ? " sel" : "") +
+                    (camera.enabled ? "" : " off");
+
+    const dot = document.createElement("span");
+    dot.className = "dot"; dot.style.background = colorOf(index);
+
+    const name = document.createElement("span");
+    name.className = "camname"; name.textContent = camera.name;
+
+    const aim = document.createElement("span");
+    aim.className = "camaim";
+    aim.textContent = `${Math.round(camera.yaw)}° / ${Math.round(camera.pitch)}°`;
+
+    row.append(dot, name, aim);
 
     const occluded = occlusionFraction(camera, state.rig.orientation, state.nadir);
-    const cell = (html) => { const td = document.createElement("td"); td.innerHTML = html; return td; };
-
-    const name = cell(`<span class="swatch" style="background:${colorOf(index)}"></span>` +
-                      `<input type="text" value="${camera.name}" data-f="name" style="width:74px">`);
-    tr.appendChild(name);
-    for (const field of ["yaw", "pitch", "h_fov", "v_fov"]) {
-      tr.appendChild(cell(`<input type="number" value="${camera[field]}" data-f="${field}" step="1">`));
+    if (occluded > 0.005) {
+      const badge = document.createElement("span");
+      badge.className = "camocc";
+      badge.textContent = Math.round(occluded * 100) + "%";
+      badge.title = "share of this camera inside the occluder";
+      row.append(badge);
     }
-    tr.appendChild(cell(`<input type="checkbox" data-f="enabled" ${camera.enabled ? "checked" : ""}>`));
-    tr.appendChild(cell(occluded > 0.005
-      ? `<span class="occ" title="share of this view inside the occluder">${Math.round(occluded*100)}%</span>`
-      : `<button data-del="1" title="remove">×</button>`));
 
-    tr.addEventListener("click", () => { state.selected = index; refresh(false); previewCamera(); });
-    tr.querySelectorAll("input").forEach((input) => {
-      input.addEventListener("change", () => {
-        const field = input.dataset.f;
-        camera[field] = field === "enabled" ? input.checked
-                      : field === "name" ? input.value
-                      : parseFloat(input.value) || 0;
-        refresh();
-      });
-      input.addEventListener("click", (event) => event.stopPropagation());
-    });
-    const del = tr.querySelector("[data-del]");
-    if (del) del.addEventListener("click", (event) => {
-      event.stopPropagation();
-      state.rig.cameras.splice(index, 1);
-      state.selected = Math.max(0, state.selected - 1);
-      refresh();
-    });
+    const toggle = document.createElement("input");
+    toggle.type = "checkbox"; toggle.checked = camera.enabled;
+    toggle.title = "include in extraction";
+    toggle.addEventListener("click", (event) => event.stopPropagation());
+    toggle.addEventListener("change", () => { camera.enabled = toggle.checked; refresh(); });
+    row.append(toggle);
 
-    body.appendChild(tr);
+    row.addEventListener("click", () => select(index));
+    list.append(row);
   });
 
   const enabled = state.rig.cameras.filter((c) => c.enabled).length;
-  $("camcount").textContent = `${enabled}/${state.rig.cameras.length} on`;
+  $("camcount").textContent = `${enabled} of ${state.rig.cameras.length} enabled`;
 }
 
-function readOutput() {
-  state.rig.output = {
-    width: parseInt($("ow").value) || 1920,
-    height: parseInt($("oh").value) || 1440,
-    format: $("ofmt").value,
-    quality: parseInt($("oq").value) || 2,
-    interp: state.rig.output.interp || "line",
-  };
-  state.rig.orientation = {
-    yaw: parseFloat($("oyaw").value) || 0,
-    pitch: parseFloat($("opitch").value) || 0,
-    roll: 0,
-  };
+function renderEditor() {
+  const camera = current();
+  if (!camera) return;
+  $("cname").value = camera.name;
+  $("cyaw").value = camera.yaw;   $("cyawv").textContent = Math.round(camera.yaw) + "°";
+  $("cpitch").value = camera.pitch; $("cpitchv").textContent = Math.round(camera.pitch) + "°";
+  $("cfov").value = camera.h_fov; $("cfovv").textContent = Math.round(camera.h_fov) + "°";
+
+  const ratio = camera.h_fov / camera.v_fov;
+  let best = "1.3333", diff = 9;
+  for (const option of $("caspect").options) {
+    const d = Math.abs(parseFloat(option.value) - ratio);
+    if (d < diff) { diff = d; best = option.value; }
+  }
+  $("caspect").value = best;
+
+  const size = sizes[camera.name];
+  $("res").textContent = size
+    ? `writes ${size[0]}x${size[1]} — native detail for a ${Math.round(camera.h_fov)}° view`
+    : "";
 }
 
-function writeOutput() {
-  $("ow").value = state.rig.output.width;
-  $("oh").value = state.rig.output.height;
-  $("ofmt").value = state.rig.output.format;
-  $("oq").value = state.rig.output.quality;
-  $("oyaw").value = state.rig.orientation.yaw;
-  $("opitch").value = state.rig.orientation.pitch;
+function select(index) {
+  state.selected = index;
+  renderCameras(); renderEditor(); draw(); previewCamera();
+}
+
+function editCamera(field, value) {
+  const camera = current();
+  if (!camera) return;
+  if (field === "aspect") {
+    camera.v_fov = Math.min(camera.h_fov / value, 179);
+  } else {
+    camera[field] = value;
+    if (field === "h_fov") {
+      const ratio = parseFloat($("caspect").value) || 4/3;
+      camera.v_fov = Math.min(value / ratio, 179);
+    }
+  }
+  refresh();
+}
+
+// -------------------------------------------------------------- settings
+
+function readSettings() {
+  state.rig.output.format = $("ofmt").value;
+  state.rig.output.quality = parseInt($("oq").value) || 2;
+  state.rig.output.auto = true;   // sizes always follow the source
+  state.rig.orientation.yaw = parseFloat($("oyaw").value) || 0;
+  state.rig.orientation.pitch = parseFloat($("opitch").value) || 0;
 }
 
 function estimate() {
@@ -374,32 +476,35 @@ function estimate() {
   const mode = $("mode").value, value = parseFloat($("modeval").value) || 1;
   let frames = 1;
   if (state.media.is_video) {
-    if (mode === "fps") frames = Math.max(Math.floor(state.media.duration * value), 1);
+    if (mode === "fps" || mode === "sharp") frames = Math.max(Math.floor(state.media.duration * value), 1);
     else if (mode === "every") frames = Math.max(Math.floor(state.media.frame_count / value), 1);
     else frames = state.media.frame_count;
   }
-  $("estimate").textContent =
-    `~${frames} frames x ${enabled} cameras = ~${frames * enabled} images`;
-}
-
-async function validate() {
-  try {
-    const data = await api("/api/rig/validate", { rig: state.rig });
-    $("warnings").textContent = data.warnings.join("  |  ");
-  } catch (err) {
-    $("warnings").textContent = err.message;
-  }
+  const note = mode === "sharp" ? " (sharpest in each window)" : "";
+  $("estimate").textContent = `~${frames} frames x ${enabled} cameras = ~${frames * enabled} images${note}`;
 }
 
 let validateTimer = null;
 function refresh(revalidate = true) {
-  readOutput();
-  renderCameras();
-  draw();
-  estimate();
+  readSettings();
+  renderCameras(); renderEditor(); draw(); estimate();
   if (revalidate) {
     clearTimeout(validateTimer);
-    validateTimer = setTimeout(validate, 250);
+    validateTimer = setTimeout(validate, 220);
+  }
+}
+
+async function validate() {
+  try {
+    const data = await api("/api/rig/validate", {
+      rig: state.rig,
+      source_width: state.media ? state.media.width : 0,
+    });
+    sizes = data.sizes || {};
+    $("warnings").textContent = data.warnings.join(" · ");
+    renderEditor();
+  } catch (err) {
+    $("warnings").textContent = err.message;
   }
 }
 
@@ -423,9 +528,9 @@ canvas.addEventListener("mousedown", (event) => {
     if (distance < bestDistance) { bestDistance = distance; best = index; }
   });
   if (best >= 0 && bestDistance < 60) {
-    state.selected = best;
     state.dragging = best;
-    refresh(false);
+    canvas.classList.add("dragging");
+    select(best);
   }
 });
 
@@ -433,17 +538,37 @@ window.addEventListener("mousemove", (event) => {
   if (state.dragging === null) return;
   const at = canvasAngles(event);
   const camera = state.rig.cameras[state.dragging];
-  camera.yaw = Math.round((at.yaw - state.rig.orientation.yaw) * 10) / 10;
-  camera.pitch = Math.max(-90, Math.min(90,
-    Math.round((at.pitch - state.rig.orientation.pitch) * 10) / 10));
-  refresh(false);
+  camera.yaw = Math.round(at.yaw - state.rig.orientation.yaw);
+  camera.pitch = Math.max(-90, Math.min(90, Math.round(at.pitch - state.rig.orientation.pitch)));
+  renderCameras(); renderEditor(); draw();
 });
 
 window.addEventListener("mouseup", () => {
-  if (state.dragging !== null) { state.dragging = null; refresh(); previewCamera(); }
+  if (state.dragging === null) return;
+  state.dragging = null;
+  canvas.classList.remove("dragging");
+  refresh(); previewCamera();
 });
 
-// ------------------------------------------------------------- previews
+// ------------------------------------------------------------- browsing
+
+async function pick(mode, title, kind, initial) {
+  const data = await api("/api/pick", { mode, title, kind, initial: initial || "" });
+  return data.paths;
+}
+
+async function browseSource() {
+  try {
+    setStatus("waiting for the file dialog…");
+    const paths = await pick("open", "Select a 360 video or still", "media",
+                             state.media ? state.media.path : "");
+    if (!paths.length) { setStatus("idle"); return; }
+    $("path").value = paths[0];
+    await loadMedia();
+  } catch (err) {
+    setStatus(err.message, "bad");
+  }
+}
 
 async function loadMedia() {
   const path = $("path").value.trim();
@@ -452,20 +577,27 @@ async function loadMedia() {
   try {
     const data = await api("/api/preview", { path, time: parseFloat($("time").value) || 0 });
     state.media = data.media;
-    $("media").textContent =
-      `${data.media.width}x${data.media.height}` +
-      (data.media.is_video ? `  ${data.media.duration.toFixed(1)}s  ${data.media.fps}fps` : "  still");
-    $("media").className = data.media.looks_equirectangular ? "hint" : "hint warn";
-    if (!data.media.looks_equirectangular) {
-      $("media").textContent += "  — not 2:1, geometry will be wrong";
+
+    const m = data.media;
+    $("media").textContent = `${m.width}x${m.height}` +
+      (m.is_video ? ` · ${m.duration.toFixed(1)}s · ${m.fps}fps` : " · still");
+    $("media").className = m.looks_equirectangular ? "hint" : "hint warn";
+    if (!m.looks_equirectangular) $("media").textContent += " · not 2:1, geometry will be wrong";
+    $("time").max = m.is_video ? Math.max(m.duration - 0.1, 0) : 0;
+
+    // Default the output beside the source, so it never lands in whatever
+    // directory the app happened to start in.
+    if (!state.outdirTouched) {
+      const separator = m.path.includes("\\") ? "\\" : "/";
+      $("outdir").value = m.path.slice(0, m.path.lastIndexOf(separator)) + separator + "dataset";
     }
-    $("time").max = data.media.is_video ? Math.max(data.media.duration - 0.1, 0) : 0;
 
     const image = new Image();
-    image.onload = () => { state.image = image; draw(); };
+    image.onload = () => { state.image = image; fitCanvas(); };
     image.src = data.url;
-    setStatus("ready");
-    estimate();
+
+    setStatus("ready", "good");
+    refresh();
     previewCamera();
   } catch (err) {
     setStatus(err.message, "bad");
@@ -476,38 +608,37 @@ let previewTimer = null;
 function previewCamera() {
   clearTimeout(previewTimer);
   previewTimer = setTimeout(async () => {
-    const camera = state.rig.cameras[state.selected];
-    if (!state.media || !camera || !camera.enabled) { $("campreview").style.display = "none"; return; }
+    const camera = current();
+    if (!state.media || !camera || !camera.enabled) {
+      $("campreview").style.display = "none"; return;
+    }
     try {
       const data = await api("/api/camera-preview", {
         path: state.media.path, rig: state.rig, camera: camera.name,
-        time: parseFloat($("time").value) || 0, width: 400,
+        time: parseFloat($("time").value) || 0, width: 420,
       });
-      const img = $("campreview");
-      img.src = data.url;
-      img.style.display = "block";
+      $("campreview").src = data.url;
+      $("campreview").style.display = "block";
     } catch (err) {
       $("campreview").style.display = "none";
     }
-  }, 220);
+  }, 200);
 }
 
-// -------------------------------------------------------------- actions
+// -------------------------------------------------------------- extract
 
 async function startExtract() {
   if (!state.media) { setStatus("load a source first", "warn"); return; }
-  readOutput();
+  readSettings();
+  const outdir = $("outdir").value.trim();
+  if (!outdir) { setStatus("choose an output folder", "warn"); return; }
   try {
     await api("/api/extract", {
-      sources: [state.media.path],
-      rig: state.rig,
-      mode: $("mode").value,
-      value: parseFloat($("modeval").value) || 2,
-      output_dir: $("outdir").value.trim() || "dataset",
-      resume: true,
+      sources: [state.media.path], rig: state.rig,
+      mode: $("mode").value, value: parseFloat($("modeval").value) || 2,
+      output_dir: outdir, resume: true,
     });
-    $("extract").disabled = true;
-    $("cancel").disabled = false;
+    $("extract").disabled = true; $("cancel").disabled = false;
     poll();
   } catch (err) {
     setStatus(err.message, "bad");
@@ -524,82 +655,118 @@ async function poll() {
   } catch (err) {
     setStatus(err.message, "bad");
   }
-  $("extract").disabled = false;
-  $("cancel").disabled = true;
+  $("extract").disabled = false; $("cancel").disabled = true;
 }
 
-// ----------------------------------------------------------------- init
+// ----------------------------------------------------------------- wire
 
-async function init() {
-  const data = await api("/api/presets");
-  const select = $("preset");
-  for (const name of Object.keys(data.presets)) {
-    const option = document.createElement("option");
-    option.value = name; option.textContent = name;
-    select.appendChild(option);
-  }
-  state.presets = data.presets;
-  state.rig = structuredClone(data.presets["ring"]);
-  writeOutput();
-  refresh();
-}
-
-$("load").addEventListener("click", loadMedia);
-$("path").addEventListener("keydown", (e) => { if (e.key === "Enter") loadMedia(); });
-$("time").addEventListener("input", () => {
-  $("timelabel").textContent = (parseFloat($("time").value) || 0).toFixed(1) + "s";
-});
-$("time").addEventListener("change", () => { loadMedia(); });
-$("applypreset").addEventListener("click", () => {
-  const name = $("preset").value;
-  if (!name) return;
-  state.rig = structuredClone(state.presets[name]);
-  state.selected = 0;
-  writeOutput(); refresh(); previewCamera();
-});
-$("saverig").addEventListener("click", async () => {
-  readOutput();
+$("browse").addEventListener("click", browseSource);
+$("browseout").addEventListener("click", async () => {
   try {
-    const data = await api("/api/rig/save", { rig: state.rig, path: $("rigpath").value.trim() });
-    setStatus("saved " + data.path, "good");
+    const paths = await pick("directory", "Choose an output folder", "media", $("outdir").value);
+    if (paths.length) { $("outdir").value = paths[0]; state.outdirTouched = true; }
   } catch (err) { setStatus(err.message, "bad"); }
+});
+$("outdir").addEventListener("input", () => { state.outdirTouched = true; });
+
+$("time").addEventListener("input", () =>
+  $("timelabel").textContent = (parseFloat($("time").value) || 0).toFixed(1) + "s");
+$("time").addEventListener("change", loadMedia);
+
+$("applypreset").addEventListener("click", () => {
+  state.rig = structuredClone(state.presets[$("preset").value]);
+  state.selected = 0;
+  refresh(); previewCamera();
 });
 $("loadrig").addEventListener("click", async () => {
   try {
-    const data = await api("/api/rig/load", { path: $("rigpath").value.trim() });
+    const paths = await pick("open", "Open a rig", "rig", "");
+    if (!paths.length) return;
+    const data = await api("/api/rig/load", { path: paths[0] });
     state.rig = data.rig; state.selected = 0;
-    writeOutput(); refresh(); previewCamera();
-    setStatus("loaded", "good");
+    $("ofmt").value = state.rig.output.format;
+    $("oq").value = state.rig.output.quality;
+    $("oyaw").value = state.rig.orientation.yaw;
+    $("opitch").value = state.rig.orientation.pitch;
+    refresh(); previewCamera();
+    setStatus("loaded " + paths[0], "good");
   } catch (err) { setStatus(err.message, "bad"); }
 });
+$("saverig").addEventListener("click", async () => {
+  try {
+    // A save dialog is what stops an empty filename reaching the server.
+    const paths = await pick("save", "Save rig as", "rig", "");
+    if (!paths.length) return;
+    readSettings();
+    const data = await api("/api/rig/save", { rig: state.rig, path: paths[0] });
+    setStatus("saved " + data.path, "good");
+  } catch (err) { setStatus(err.message, "bad"); }
+});
+
 $("addcam").addEventListener("click", () => {
-  state.rig.cameras.push({ name: "cam" + state.rig.cameras.length,
+  state.rig.cameras.push({ name: "cam" + (state.rig.cameras.length + 1),
     yaw: 0, pitch: 0, roll: 0, h_fov: 90, v_fov: 67.5, enabled: true });
-  state.selected = state.rig.cameras.length - 1;
-  refresh(); previewCamera();
+  select(state.rig.cameras.length - 1); refresh();
 });
 $("dupcam").addEventListener("click", () => {
-  const camera = state.rig.cameras[state.selected];
+  const camera = current();
   if (!camera) return;
   const copy = structuredClone(camera);
-  copy.name = camera.name + "_2";
+  let n = 2;
+  while (state.rig.cameras.some((c) => c.name === camera.name + "_" + n)) n++;
+  copy.name = camera.name + "_" + n;
   state.rig.cameras.splice(state.selected + 1, 0, copy);
-  state.selected += 1;
+  select(state.selected + 1); refresh();
+});
+$("delcam").addEventListener("click", () => {
+  if (state.rig.cameras.length <= 1) { setStatus("a rig needs at least one camera", "warn"); return; }
+  state.rig.cameras.splice(state.selected, 1);
+  state.selected = Math.max(0, state.selected - 1);
   refresh(); previewCamera();
 });
+
+$("cname").addEventListener("change", () => editCamera("name", $("cname").value));
+$("cyaw").addEventListener("input", () => editCamera("yaw", parseFloat($("cyaw").value)));
+$("cpitch").addEventListener("input", () => editCamera("pitch", parseFloat($("cpitch").value)));
+$("cfov").addEventListener("input", () => editCamera("h_fov", parseFloat($("cfov").value)));
+["cyaw","cpitch","cfov"].forEach((id) => $(id).addEventListener("change", previewCamera));
+$("caspect").addEventListener("change", () => {
+  editCamera("aspect", parseFloat($("caspect").value)); previewCamera();
+});
+
 $("nadir").addEventListener("input", () => {
   state.nadir = parseInt($("nadir").value) || 0;
-  $("nadirval").textContent = state.nadir ? "−" + state.nadir + "°" : "off";
-  state.rig.occluders = state.nadir
-    ? [{ type: "nadir_cone", angle: state.nadir }] : [];
-  refresh(false);
+  $("nadirval").textContent = state.nadir ? "below −" + state.nadir + "°" : "off";
+  state.rig.occluders = state.nadir ? [{ type: "nadir_cone", angle: state.nadir }] : [];
+  renderCameras(); draw();
 });
-["ow","oh","ofmt","oq","oyaw","opitch","mode","modeval"].forEach((id) =>
+$("mode").addEventListener("change", () => {
+  const mode = $("mode").value;
+  $("modevalrow").style.display = mode === "all" ? "none" : "flex";
+  $("modeval").value = mode === "every" ? 10 : 2;
+  refresh();
+});
+["ofmt","oq","oyaw","opitch","modeval"].forEach((id) =>
   $(id).addEventListener("change", () => refresh()));
 $("extract").addEventListener("click", startExtract);
 $("cancel").addEventListener("click", () => api("/api/cancel", {}));
+window.addEventListener("resize", fitCanvas);
 
-init();
+(async function init() {
+  const data = await api("/api/presets");
+  state.presets = data.presets;
+  for (const name of Object.keys(data.presets)) {
+    const option = document.createElement("option");
+    option.value = name; option.textContent = name;
+    $("preset").append(option);
+  }
+  $("preset").value = "ring";
+  state.rig = structuredClone(data.presets["ring"]);
+  $("ofmt").value = state.rig.output.format;
+  $("oq").value = state.rig.output.quality;
+  refresh(false);
+  fitCanvas();
+})();
 </script>
 </body>
 </html>

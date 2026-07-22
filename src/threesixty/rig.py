@@ -75,6 +75,23 @@ class Camera:
                        roll=wrap180(self.roll))
 
 
+def native_size(source_width: int, h_fov: float, v_fov: float) -> tuple[int, int]:
+    """Output size that preserves the source's own pixel density.
+
+    An equirectangular frame carries `source_width` pixels across 360 degrees, and
+    because it is 2:1 the vertical density is identical. So a camera covering
+    `h_fov` degrees deserves exactly `source_width * h_fov / 360` pixels across.
+
+    Smaller than this throws away detail the capture paid for; larger invents it and
+    inflates the dataset without adding a single real feature for photogrammetry to
+    match. Sizes are rounded to even numbers because several encoders insist on it.
+    """
+    per_degree = source_width / 360.0
+    width = max(int(round(h_fov * per_degree / 2)) * 2, 2)
+    height = max(int(round(v_fov * per_degree / 2)) * 2, 2)
+    return width, height
+
+
 @dataclass
 class Output:
     """Image dimensions and encoding for extracted frames."""
@@ -84,6 +101,11 @@ class Output:
     format: str = "jpg"
     quality: int = 2  # ffmpeg -q:v, 2 is visually lossless-ish; ignored for png
     interp: str = "line"
+    #: Derive each camera's size from the source resolution and its own field of
+    #: view, ignoring width/height. This is the sensible default: it keeps native
+    #: detail without upscaling, and it is per-camera, so a narrow camera in a mixed
+    #: rig is not forced to the same pixel count as a wide one.
+    auto: bool = True
 
     def validate(self) -> None:
         for axis in ("width", "height"):
@@ -161,9 +183,10 @@ class Rig:
             if not camera.enabled:
                 continue
             # v360 maps h_fov/v_fov onto w/h independently, so mismatched ratios
-            # silently stretch the image rather than erroring.
+            # silently stretch the image rather than erroring. Automatic sizing
+            # derives the size from the fov, so it cannot mismatch.
             fov_ratio = camera.h_fov / camera.v_fov
-            if abs(fov_ratio - target) > 0.02 * target:
+            if not self.output.auto and abs(fov_ratio - target) > 0.02 * target:
                 notes.append(
                     f"camera {camera.name!r}: fov ratio {fov_ratio:.3f} does not match output "
                     f"aspect {target:.3f} -- the image will be anisotropically stretched"
@@ -220,7 +243,19 @@ class Rig:
         return json.dumps(self.to_dict(), indent=indent) + "\n"
 
     def save(self, path: str | os.PathLike[str]) -> Path:
-        target = Path(path)
+        # An empty string becomes Path('.'), and writing to a directory fails deep
+        # inside pathlib with a bare "Permission denied: '.'" that says nothing about
+        # what the caller actually did wrong.
+        text = str(path).strip()
+        if not text:
+            raise RigError("no filename given: enter a path like rigs/my-rig.json")
+
+        target = Path(text)
+        if target.is_dir():
+            raise RigError(f"{target} is a directory -- give a filename, e.g. {target / 'rig.json'}")
+        if not target.suffix:
+            target = target.with_suffix(".json")
+
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(self.to_json(), encoding="utf-8")
         return target

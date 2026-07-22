@@ -8,11 +8,17 @@ and pays the decode cost N times.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from .ffmpeg import MediaInfo
-from .rig import Camera, Rig
+from . import sharp
+from .ffmpeg import FFmpegInfo, MediaInfo
+from .rig import Camera, Rig, native_size
+
+#: Beyond this the filtergraph goes into a script file instead of the command line.
+#: Sharp selection produces one `eq(n,N)` term per kept frame, which on a long clip
+#: runs to tens of kilobytes -- well past what Windows accepts in a command line.
+GRAPH_INLINE_LIMIT = 3000
 
 #: How many v360 chains to drive from a single decode. Each one is a full-frame
 #: resample plus an mjpeg encoder, so past roughly this many the passes stop scaling
@@ -37,16 +43,20 @@ class FrameSelection:
     frames from wherever the operator stopped walking.
     """
 
-    mode: str = "fps"  # fps | every | all
+    mode: str = "fps"  # fps | sharp | every | all
     value: float = 2.0
     start: float | None = None  # seconds
     end: float | None = None  # seconds
+    #: Frame numbers chosen by sharpness analysis, filled in by plan_extraction.
+    #: Empty until then, which is why `sharp` needs a planning pass with ffmpeg.
+    frames: tuple[int, ...] = ()
 
     def validate(self) -> None:
-        if self.mode not in {"fps", "every", "all"}:
-            raise ValueError(f"frame selection mode must be fps|every|all, got {self.mode!r}")
-        if self.mode == "fps" and not self.value > 0:
-            raise ValueError(f"--fps must be positive, got {self.value}")
+        if self.mode not in {"fps", "sharp", "every", "all"}:
+            raise ValueError(
+                f"frame selection mode must be fps|sharp|every|all, got {self.mode!r}")
+        if self.mode in {"fps", "sharp"} and not self.value > 0:
+            raise ValueError(f"--{self.mode} must be positive, got {self.value}")
         if self.mode == "every" and not (self.value >= 1 and float(self.value).is_integer()):
             raise ValueError(f"--every must be a positive whole number, got {self.value}")
         if self.start is not None and self.start < 0:
@@ -58,6 +68,9 @@ class FrameSelection:
         """The filter applied once, before the split, to thin the frame stream."""
         if not media.is_video or self.mode == "all":
             return ""
+        if self.mode == "sharp":
+            # Picked ahead of time by blurdetect; see sharp.py.
+            return sharp.select_expression(list(self.frames))
         if self.mode == "fps":
             return f"fps={self.value:g}"
         # Commas inside a filter argument have to be escaped or ffmpeg reads them as
@@ -75,12 +88,26 @@ class FrameSelection:
             duration = min(duration, self.end - (self.start or 0.0))
         duration = max(duration, 0.0)
 
+        if self.mode == "sharp":
+            return len(self.frames) if self.frames else max(int(duration * self.value), 1)
         if self.mode == "fps":
             return max(int(duration * self.value), 1)
         source_frames = int(duration * media.fps) if media.fps else media.frame_count
         if self.mode == "every":
             return max(source_frames // int(self.value), 1)
         return max(source_frames, 1)
+
+
+def camera_size(camera: Camera, rig: Rig, media: MediaInfo) -> tuple[int, int]:
+    """Output size for one camera.
+
+    With `output.auto` the size follows the source resolution and this camera's own
+    field of view, so a 45-degree camera is not padded out to the same pixel count as
+    a 90-degree one. Otherwise the rig's fixed width and height are used for all.
+    """
+    if rig.output.auto and media.width:
+        return native_size(media.width, camera.h_fov, camera.v_fov)
+    return rig.output.width, rig.output.height
 
 
 @dataclass(frozen=True)
@@ -90,6 +117,8 @@ class CameraJob:
     camera: Camera
     directory: Path
     pattern: str  # ffmpeg image2 pattern, e.g. clip_fwd_%05d.jpg
+    width: int = 0
+    height: int = 0
 
     @property
     def output_pattern(self) -> Path:
@@ -137,7 +166,8 @@ class ExtractPlan:
         return self.estimated_frames * self.total_cameras
 
 
-def build_filter_graph(cameras: list[Camera], rig: Rig, prefix: str) -> tuple[str, list[str]]:
+def build_filter_graph(cameras: list[Camera], rig: Rig, prefix: str,
+                       sizes: list[tuple[int, int]] | None = None) -> tuple[str, list[str]]:
     """Build the filter_complex string and the output label for each camera.
 
     Shape::
@@ -169,6 +199,7 @@ def build_filter_graph(cameras: list[Camera], rig: Rig, prefix: str) -> tuple[st
         source_labels = [f"[s{i}]" for i in range(count)]
 
     for index, camera in enumerate(cameras):
+        width, height = sizes[index] if sizes else (out.width, out.height)
         params = ":".join([
             "e", "rectilinear",
             f"yaw={camera.yaw:g}",
@@ -176,8 +207,8 @@ def build_filter_graph(cameras: list[Camera], rig: Rig, prefix: str) -> tuple[st
             f"roll={camera.roll:g}",
             f"h_fov={camera.h_fov:g}",
             f"v_fov={camera.v_fov:g}",
-            f"w={out.width}",
-            f"h={out.height}",
+            f"w={width}",
+            f"h={height}",
             f"interp={out.interp}",
         ])
         chains.append(f"{source_labels[index]}v360={params}[{labels[index]}]")
@@ -190,6 +221,7 @@ def build_pass_argv(
     plan: ExtractPlan,
     single_pass: Pass,
     overwrite: bool = True,
+    graph_path: Path | None = None,
 ) -> list[str]:
     """The complete argv for one ffmpeg run.
 
@@ -211,9 +243,15 @@ def build_pass_argv(
     argv += ["-i", str(plan.media.path)]
 
     graph, labels = build_filter_graph(
-        single_pass.cameras, rig, selection.filter_prefix(plan.media)
+        single_pass.cameras, rig, selection.filter_prefix(plan.media),
+        sizes=[(job.width, job.height) for job in single_pass.jobs],
     )
-    argv += ["-filter_complex", graph]
+    if graph_path is not None and len(graph) > GRAPH_INLINE_LIMIT:
+        graph_path.parent.mkdir(parents=True, exist_ok=True)
+        graph_path.write_text(graph, encoding="utf-8")
+        argv += ["-/filter_complex", str(graph_path)]
+    else:
+        argv += ["-filter_complex", graph]
 
     for label, job in zip(labels, single_pass.jobs):
         argv += ["-map", f"[{label}]"]
@@ -237,12 +275,27 @@ def plan_extraction(
     max_streams: int = DEFAULT_MAX_STREAMS,
     per_camera_folders: bool = True,
     resume: bool = False,
+    ffmpeg: FFmpegInfo | None = None,
+    on_analysis: "callable | None" = None,
 ) -> ExtractPlan:
-    """Work out the passes needed to extract `media` with `rig`."""
+    """Work out the passes needed to extract `media` with `rig`.
+
+    Sharp selection needs a decode pass over the source before anything can be
+    planned, so `ffmpeg` is required for that mode and ignored for the others.
+    """
     selection.validate()
     rig.validate()
     if max_streams < 1:
         raise ValueError(f"--max-streams must be at least 1, got {max_streams}")
+
+    if selection.mode == "sharp" and media.is_video and not selection.frames:
+        if ffmpeg is None:
+            raise ValueError("sharp frame selection needs ffmpeg; pass ffmpeg=...")
+        scores = sharp.analyze(ffmpeg, media, selection.start, selection.end)
+        frames = sharp.choose(scores, media.fps, selection.value)
+        if on_analysis is not None:
+            on_analysis(sharp.summarize(scores, frames))
+        selection = replace(selection, frames=tuple(frames))
 
     root = Path(output_root)
     clip = safe_stem(media.path.stem)
@@ -254,7 +307,9 @@ def plan_extraction(
     for camera in rig.normalized_cameras():
         directory = root / clip / camera.name if per_camera_folders else root / clip
         pattern = f"{clip}_{camera.name}_%0{digits}d.{extension}"
-        job = CameraJob(camera=camera, directory=directory, pattern=pattern)
+        width, height = camera_size(camera, rig, media)
+        job = CameraJob(camera=camera, directory=directory, pattern=pattern,
+                        width=width, height=height)
         if resume and job.marker.exists():
             skipped.append(job)
         else:

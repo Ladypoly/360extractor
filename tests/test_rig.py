@@ -74,9 +74,11 @@ class TestRigValidation:
             rig.validate()
 
     def test_warns_on_fov_aspect_mismatch(self):
-        # 90/90 fov into a 4:3 frame stretches the image; ffmpeg will not complain.
+        # 90/90 fov into a fixed 4:3 frame stretches the image; ffmpeg will not
+        # complain. Only reachable with automatic sizing off, since automatic sizing
+        # derives the frame from the fov and so can never mismatch.
         rig = Rig(cameras=[Camera(name="c", h_fov=90, v_fov=90)],
-                  output=Output(width=1920, height=1440))
+                  output=Output(width=1920, height=1440, auto=False))
         assert any("stretched" in w for w in rig.warnings())
 
     def test_no_warning_when_fov_matches_aspect(self):

@@ -119,7 +119,8 @@ def run_extraction(
             # A stale marker from an earlier run would otherwise outlive its images.
             job.marker.unlink(missing_ok=True)
 
-        argv = build_pass_argv(ffmpeg.path, plan, single_pass, overwrite)
+        graph_path = plan.output_root / ".threesixty" / f"pass{single_pass.index}.filter"
+        argv = build_pass_argv(ffmpeg.path, plan, single_pass, overwrite, graph_path)
         # stderr goes to a file rather than a second pipe: we only drain stdout while
         # the process runs, and an unread stderr pipe filling its buffer would deadlock
         # ffmpeg mid-render.

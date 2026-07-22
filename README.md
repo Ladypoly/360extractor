@@ -52,9 +52,14 @@ pip install -e ".[dev]"     # dev install with tests
 Double-click **`360extract-ui.bat`** (Windows) or run `360extract ui`. It creates the
 virtualenv on first run, checks ffmpeg, and opens a local page on `127.0.0.1:8360`.
 
-The panorama is shown with every camera's footprint drawn on it, so you can see at a glance
-whether the car hood or the person holding the stick falls inside a camera. Drag a footprint
-to aim it, and the selected camera's real extracted view is previewed beside the list.
+**Browse…** opens a real file dialog. A browser can never hand a server a filesystem path —
+`<input type=file>` deliberately hides it — so the dialog is raised by the app itself.
+
+The panorama fills the window with every camera's footprint drawn on it, so you can see at a
+glance whether the car hood or the person holding the stick falls inside a camera. Drag a
+footprint to aim it; the camera list stays a quiet summary and editing happens in one panel
+below it, rather than in a grid of inline number boxes. The selected camera's real extracted
+view is previewed underneath.
 
 The **occluder guide** slider shades everything below a chosen angle and reports what
 percentage of each camera falls inside it — the number to watch when deciding whether to
@@ -125,15 +130,44 @@ masking stage, which is not implemented yet.
 ## Frame selection
 
 ```bash
---fps 2          # 2 frames per second (default)
+--sharp 2        # 2 per second, keeping the SHARPEST frame in each window
+--fps 2          # 2 frames per second, whatever lands on the tick (default)
 --every 10       # every 10th source frame
 --all-frames     # everything
 --start 5 --end 30   # only this time window
 ```
 
-`--fps` is the right default for photogrammetry: it samples uniformly in *time*, so a capture
-that pauses does not flood the dataset with near-duplicate frames from wherever the operator
-stopped walking.
+Sampling uniformly in *time* is the right basis for photogrammetry: a capture that pauses
+does not then flood the dataset with near-duplicates from wherever the operator stopped
+walking.
+
+**`--sharp` is usually the better choice.** Uniform sampling is blind to motion blur — it
+takes whatever frame the tick lands on, and on a walking or driving capture a good share of
+those are smeared. Blurred frames are worse than useless: they contribute no matchable
+features and drag the reconstruction down. `--sharp 2` asks for the same two frames per
+second but keeps the *sharpest* frame in each half-second window instead.
+
+Sharpness comes from ffmpeg's own `blurdetect` filter, so there is no extra dependency.
+It costs one analysis decode of the source before extraction begins, and reports what it did:
+
+```
+big360.mp4: analysing sharpness…
+  picked 20 of 300 frames, mean blur 4.45 vs 4.52 across all frames (lower is sharper)
+```
+
+The idea is [Florian Bruggisser's sharp-frame-extractor](https://github.com/cansik/sharp-frame-extractor).
+
+## Output size
+
+By default each camera is written at the source's own pixel density: an equirectangular frame
+carries `width` pixels across 360°, so a 90° camera gets exactly `width / 4` pixels across.
+A 3840-wide source with a 90°×67.5° camera yields 960×720.
+
+Anything smaller throws away detail the capture paid for; anything larger invents it and
+inflates the dataset without adding a single real feature to match. Sizing is per-camera, so
+a 45° camera in a mixed rig is not padded out to match a 90° one.
+
+Pass `--width`/`--height` to override with a fixed size for every camera.
 
 ## Output
 

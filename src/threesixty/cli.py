@@ -108,12 +108,15 @@ def cmd_probe(args: argparse.Namespace) -> int:
 
 
 def _output_from_args(args: argparse.Namespace) -> Output:
+    # Asking for an explicit size is itself the request to stop deriving one.
+    fixed = args.width is not None or args.height is not None
     return Output(
-        width=args.width,
-        height=args.height,
+        width=args.width or 1920,
+        height=args.height or 1440,
         format=args.format,
         quality=args.quality,
         interp=args.interp,
+        auto=not fixed,
     )
 
 
@@ -124,7 +127,7 @@ def cmd_rig_new(args: argparse.Namespace) -> int:
     if preset == "ring":
         rig = ring(count=args.count, pitch=args.pitch, h_fov=args.h_fov, output=output)
     elif preset == "cube":
-        rig = cube(output=output if args.width != 1920 or args.height != 1440 else None)
+        rig = cube(output=output)
     elif preset == "dome":
         rig = dome(ring_count=args.count, h_fov=args.h_fov, output=output)
     elif preset == "car-forward":
@@ -153,7 +156,8 @@ def cmd_rig_show(args: argparse.Namespace) -> int:
     rig = load_rig(args.rig)
     out = rig.output
     print(f"{rig.name}  ({len(rig.enabled_cameras)}/{len(rig.cameras)} cameras enabled)")
-    print(f"  output      {out.width}x{out.height} {out.format} q{out.quality} interp={out.interp}")
+    size = "native (from source and fov)" if out.auto else f"{out.width}x{out.height}"
+    print(f"  output      {size} {out.format} q{out.quality} interp={out.interp}")
     orientation = rig.orientation
     if (orientation.yaw, orientation.pitch, orientation.roll) != (0.0, 0.0, 0.0):
         print(f"  orientation yaw={orientation.yaw:g} pitch={orientation.pitch:g} "
@@ -197,6 +201,8 @@ def load_rig(value: str) -> Rig:
 
 
 def _selection_from_args(args: argparse.Namespace) -> FrameSelection:
+    if args.sharp is not None:
+        return FrameSelection("sharp", args.sharp, args.start, args.end)
     if args.every is not None:
         return FrameSelection("every", float(args.every), args.start, args.end)
     if args.all_frames:
@@ -220,6 +226,7 @@ def cmd_extract(args: argparse.Namespace) -> int:
     if args.width or args.height:
         rig.output.width = args.width or rig.output.width
         rig.output.height = args.height or rig.output.height
+        rig.output.auto = False  # an explicit size overrides automatic sizing
         rig.output.validate()
 
     for warning in rig.warnings():
@@ -243,6 +250,9 @@ def cmd_extract(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
 
+        if selection.mode == "sharp" and media.is_video:
+            print(f"{media.path.name}: analysing sharpness…", flush=True)
+
         plan = plan_extraction(
             media=media,
             rig=rig,
@@ -251,6 +261,8 @@ def cmd_extract(args: argparse.Namespace) -> int:
             max_streams=args.max_streams,
             per_camera_folders=not args.flat,
             resume=not args.no_resume,
+            ffmpeg=ffmpeg,
+            on_analysis=lambda note: print(f"  {note}"),
         )
 
         if not plan.passes:
@@ -334,8 +346,10 @@ def build_parser() -> argparse.ArgumentParser:
                          help="camera pitch in degrees, negative looks down (default 0)")
     rig_new.add_argument("--h-fov", dest="h_fov", type=float, default=90.0,
                          help="horizontal field of view (default 90)")
-    rig_new.add_argument("--width", type=int, default=1920)
-    rig_new.add_argument("--height", type=int, default=1440)
+    rig_new.add_argument("--width", type=int,
+                         help="fixed output width; omit to size each camera from the "
+                              "source resolution and its own field of view")
+    rig_new.add_argument("--height", type=int, help="fixed output height")
     rig_new.add_argument("--format", choices=["jpg", "png"], default="jpg")
     rig_new.add_argument("--quality", type=int, default=2,
                          help="jpeg quality 1-31, lower is better (default 2)")
@@ -361,6 +375,9 @@ def build_parser() -> argparse.ArgumentParser:
     frames = extract.add_mutually_exclusive_group()
     frames.add_argument("--fps", type=float, default=2.0,
                         help="sample this many frames per second (default 2)")
+    frames.add_argument("--sharp", type=float, metavar="FPS",
+                        help="like --fps, but keep the sharpest frame in each window "
+                             "instead of whatever lands on the tick (skips motion blur)")
     frames.add_argument("--every", type=int, metavar="N", help="take every Nth source frame")
     frames.add_argument("--all-frames", action="store_true", help="extract every source frame")
 

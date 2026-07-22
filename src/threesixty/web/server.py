@@ -18,9 +18,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from . import picker
 from ..extract import run_extraction
 from ..ffmpeg import FFmpegError, MediaInfo, probe_media, resolve_ffmpeg
-from ..plan import FrameSelection, plan_extraction
+from ..plan import FrameSelection, camera_size, plan_extraction
 from ..rig import PRESETS, Camera, Orientation, Output, Rig, RigError
 
 STATIC = Path(__file__).parent / "static"
@@ -168,6 +169,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.api_rig_load(payload))
             elif route.path == "/api/extract":
                 self._json(self.api_extract(payload))
+            elif route.path == "/api/pick":
+                self._json(self.api_pick(payload))
             elif route.path == "/api/cancel":
                 self.session.job.cancel.set()
                 self._json({"ok": True})
@@ -180,6 +183,21 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": str(exc)}, 500)
 
     # -- endpoints ----------------------------------------------------------
+
+    def api_pick(self, payload: dict) -> dict:
+        """Raise a native file dialog. The browser cannot supply real paths itself."""
+        if not picker.available():
+            raise ValueError(
+                "no file dialog available (tkinter is missing from this Python). "
+                "Type the path into the field instead."
+            )
+        paths = picker.ask(
+            mode=payload.get("mode", "open"),
+            title=payload.get("title", "Select"),
+            kind=payload.get("kind", "media"),
+            initial=payload.get("initial", ""),
+        )
+        return {"paths": paths}
 
     def api_probe(self, payload: dict) -> dict:
         info = probe_media(payload["path"], self.session.ffmpeg)
@@ -215,7 +233,10 @@ class Handler(BaseHTTPRequestHandler):
 
         time = float(payload.get("time", 0.0))
         width = int(payload.get("width", 480))
-        height = max(int(width / rig.output.aspect), 1)
+        # Match the aspect the camera will actually be written at, or the preview
+        # misrepresents the framing it exists to show.
+        aspect = (camera.h_fov / camera.v_fov) if rig.output.auto else rig.output.aspect
+        height = max(int(width / aspect), 1)
         target = self.session.next_name(".jpg")
 
         argv = [str(self.session.ffmpeg.path), "-hide_banner", "-loglevel", "error", "-y"]
@@ -236,8 +257,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_validate(self, payload: dict) -> dict:
         rig = rig_from_payload(payload["rig"])
+        source_width = int(payload.get("source_width") or 0)
+
+        # Report the size each camera will really be written at, so the UI can show
+        # it rather than making the user infer it from the auto setting.
+        sizes = {}
+        if source_width:
+            fake = MediaInfo(path=Path("."), width=source_width, height=source_width // 2,
+                             fps=0.0, duration=0.0, frame_count=1, codec="", is_video=False)
+            for camera in rig.normalized_cameras():
+                width, height = camera_size(camera, rig, fake)
+                sizes[camera.name] = [width, height]
+
         return {"ok": True, "warnings": rig.warnings(),
-                "enabled": len(rig.enabled_cameras)}
+                "enabled": len(rig.enabled_cameras), "sizes": sizes}
 
     def api_rig_save(self, payload: dict) -> dict:
         rig = rig_from_payload(payload["rig"])
@@ -276,8 +309,14 @@ class Handler(BaseHTTPRequestHandler):
                         job.update(state="cancelled", message="cancelled")
                         return
                     info = probe_media(source, session.ffmpeg)
-                    plan = plan_extraction(info, rig, selection, output_dir,
-                                           resume=bool(payload.get("resume", True)))
+                    if selection.mode == "sharp" and info.is_video:
+                        job.update(message=f"{info.path.name}: analysing sharpness…")
+                    plan = plan_extraction(
+                        info, rig, selection, output_dir,
+                        resume=bool(payload.get("resume", True)),
+                        ffmpeg=session.ffmpeg,
+                        on_analysis=lambda note: job.update(message=note),
+                    )
                     if not plan.passes:
                         job.update(message=f"{info.path.name}: already extracted")
                         continue

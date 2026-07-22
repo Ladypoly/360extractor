@@ -160,11 +160,24 @@ class TestRigFiles:
         status, body = post(ui, "/api/rig/validate", {
             "rig": {
                 "cameras": [{"name": "a", "h_fov": 90, "v_fov": 90}],
-                "output": {"width": 1920, "height": 1440},
+                "output": {"width": 1920, "height": 1440, "auto": False},
             },
         })
         assert status == 200
         assert any("stretched" in w for w in body["warnings"])
+
+    def test_validate_reports_the_size_each_camera_will_be_written_at(self, ui):
+        status, body = post(ui, "/api/rig/validate", {
+            "rig": {
+                "cameras": [{"name": "wide", "h_fov": 90, "v_fov": 67.5},
+                            {"name": "narrow", "yaw": 90, "h_fov": 45, "v_fov": 33.75}],
+                "output": {"auto": True},
+            },
+            "source_width": 4096,
+        })
+        assert status == 200
+        assert body["sizes"]["wide"] == [1024, 768]
+        assert body["sizes"]["narrow"] == [512, 384]
 
 
 class TestExtraction:
