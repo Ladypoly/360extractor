@@ -116,16 +116,50 @@ Presets are accepted anywhere a rig file is, so `--rig ring` works without writi
 
 This is the whole point of the tool, and there are two halves to it.
 
-**Static occluders — the stick, the tripod, the car roof.** These are rigid relative to the rig,
-so they occupy the same region of the frame in every single frame. The cheapest fix is rig
-layout: `dome` and `handheld` simply never point a camera at the ground, and `car-forward` omits
-the rear where the mount usually is. `pitch` and `orientation` handle the rest.
+### Static occluders — the stick, the tripod, the car roof
 
-**Dynamic occluders — the operator walking, passing cars, faces and plates.** These move, so
-layout cannot exclude them. That is the masking milestone (below).
+Rigid relative to the rig, so they sit in the *same region of every single frame*. That is what
+makes them cheap to deal with, and it is why this happens **before** extraction rather than
+after.
 
-The `occluders` block in a rig is already parsed and round-trips safely; it is consumed by the
-masking stage, which is not implemented yet.
+The cheapest fix is rig layout: `dome` and `handheld` never point a camera at the ground, and
+`car-forward` omits the rear where the mount usually is. Beyond that:
+
+```bash
+360extract extract CLIP.mp4 --rig car-forward --nadir 40 --mask sidecar -o dataset/
+```
+
+`--nadir 40` masks everything more than 40° below the horizon. For anything that is not a neat
+cone — a hood, a mount arm, a wing mirror — paint it directly onto the panorama in the UI.
+
+Paint once, and the same region is pushed through the *identical* `v360` call used for the
+picture, so the per-camera mask is aligned pixel for pixel by construction. One render per
+camera, reused for every frame, rather than one per frame.
+
+`--mask` chooses what to do about it:
+
+| mode | effect |
+|---|---|
+| `sidecar` | a mask beside every image. No pixels lost, the trainer decides. **Default.** |
+| `skip` | drop cameras more than two thirds occluder — not worth extracting, let alone training |
+| `burn` | paint it black into the images. For tools that cannot read masks. Irreversible |
+| `none` | record the occluders in the rig, mask nothing |
+
+Cameras the occluder never reaches get no mask file at all: an all-white mask changes nothing
+but still costs a file per frame and needlessly switches that camera into masked handling.
+
+**Mask polarity: white keeps, black is ignored.** Brush, COLMAP and nerfstudio all agree —
+Brush copies mask luma straight into the image's alpha (`pixel[3] = mask_pixel[0]`) and treats
+alpha 0 as "do not train here". Getting this backwards silently trains on *only* the car.
+
+### Dynamic occluders — people, passing cars, faces and plates
+
+These move, so no painted region can catch them. They need detection per frame, and that runs
+*after* extraction, on the rectilinear tiles: detectors are trained on ordinary photographs and
+equirectangular distortion wrecks their recall away from the equator.
+
+Not built yet — it is the next milestone (YOLO to find them, SAM 2.1 to refine and track them,
+results fused back through the sphere so overlapping cameras agree).
 
 ## Frame selection
 
@@ -173,12 +207,16 @@ Pass `--width`/`--height` to override with a fixed size for every camera.
 
 ```
 dataset/
-  clip/
-    fwd/   clip_fwd_00001.jpg  clip_fwd_00002.jpg  ...
-    left/  clip_left_00001.jpg ...
+  images/clip/fwd/   clip_fwd_00001.jpg  clip_fwd_00002.jpg  ...
+  images/clip/left/  clip_left_00001.jpg ...
+  masks/ clip/fwd/   clip_fwd_00001.png  ...
 ```
 
-Use `--flat` to put every camera in one folder. Sequence numbers are consistent across cameras —
+This is the layout Brush and COLMAP both read. Brush pairs an image with its mask by mirroring
+the subpath — `images/a/b/x.jpg` to `masks/a/b/x.png` — and **requires the nested directories to
+match**, which is why masks mirror the image tree rather than sitting in one folder.
+
+Use `--layout flat` for the older shape. Sequence numbers are consistent across cameras —
 the same number always means the same instant, because every camera receives the identical frame
 set from one split.
 
@@ -191,10 +229,10 @@ finished.
 | Milestone | State |
 |---|---|
 | M1 — rig format, ffmpeg discovery, extraction | **done** |
-| M2 — nadir cones and painted equirect masks | not started |
+| M2 — nadir cones and painted equirect masks | **done** — no ML dependency |
 | M3 — ML masking (YOLO, SAM 2.1, SAM 3) | not started |
-| M4 — GPS/GPX and COLMAP export | not started |
-| M5 — rig editor UI | **done** (occluder guide is visual only until M2) |
+| M4 — Brush/COLMAP rig export | not started |
+| M5 — rig editor UI | **done** |
 | M6 — inpainting | not started |
 
 ## Tests

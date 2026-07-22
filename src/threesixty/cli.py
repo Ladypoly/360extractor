@@ -27,6 +27,7 @@ from .ffmpeg import (
     resolve_ffmpeg,
     survey_ffmpeg,
 )
+from .mask import apply as mask_apply
 from .plan import DEFAULT_MAX_STREAMS, FrameSelection, plan_extraction
 from .rig import PRESETS, Output, Rig, RigError, cube, dome, handheld, ring, car_forward
 
@@ -223,6 +224,11 @@ def cmd_extract(args: argparse.Namespace) -> int:
     ffmpeg = resolve_ffmpeg(args.ffmpeg)
     rig = load_rig(args.rig)
 
+    if args.nadir:
+        # Replaces any nadir cone the rig already carried, rather than stacking.
+        rig.occluders = [o for o in rig.occluders if o.get("type") != "nadir_cone"]
+        rig.occluders.append({"type": "nadir_cone", "angle": args.nadir})
+
     if args.width or args.height:
         rig.output.width = args.width or rig.output.width
         rig.output.height = args.height or rig.output.height
@@ -259,11 +265,15 @@ def cmd_extract(args: argparse.Namespace) -> int:
             selection=selection,
             output_root=root,
             max_streams=args.max_streams,
-            per_camera_folders=not args.flat,
+            layout=args.layout,
             resume=not args.no_resume,
             ffmpeg=ffmpeg,
             on_analysis=lambda note: print(f"  {note}"),
+            mask_mode=args.mask,
         )
+
+        for line in mask_apply.summarize(plan.mask_plan) if plan.mask_plan else []:
+            print(f"  {line}")
 
         if not plan.passes:
             print(f"{media.path.name}: already extracted ({len(plan.skipped)} cameras), skipping")
@@ -286,6 +296,7 @@ def cmd_extract(args: argparse.Namespace) -> int:
         finish_progress()
 
         totals.images_written += result.images_written
+        totals.masks_written += result.masks_written
         totals.cameras_done += result.cameras_done
         totals.cameras_skipped += result.cameras_skipped
         totals.passes_run += result.passes_run
@@ -302,6 +313,7 @@ def cmd_extract(args: argparse.Namespace) -> int:
     print(
         f"\n{totals.images_written} images from {totals.cameras_done} cameras "
         f"in {totals.elapsed:.1f}s ({rate:.0f} img/s)"
+        + (f", {totals.masks_written} masks" if totals.masks_written else "")
         + (f", {totals.cameras_skipped} skipped" if totals.cameras_skipped else "")
     )
     return 0
@@ -387,8 +399,18 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--height", type=int, help="override rig output height")
     extract.add_argument("--max-streams", type=int, default=DEFAULT_MAX_STREAMS,
                          help=f"cameras per ffmpeg pass (default {DEFAULT_MAX_STREAMS})")
-    extract.add_argument("--flat", action="store_true",
-                         help="write all cameras into one folder instead of one folder each")
+    extract.add_argument("--layout", choices=["brush", "flat"], default="brush",
+                         help="brush: <out>/images/<clip>/<camera>/ with masks/ mirroring it, "
+                              "which Brush and COLMAP both read (default). flat: the older shape")
+    extract.add_argument("--mask", choices=["sidecar", "skip", "burn", "none"],
+                         default="sidecar",
+                         help="what to do about the rig's occluders. sidecar: write a mask "
+                              "beside every image, losing no pixels (default). skip: drop "
+                              "cameras that are mostly occluder. burn: black it into the "
+                              "images. none: ignore them")
+    extract.add_argument("--nadir", type=float, metavar="DEG",
+                         help="add a nadir cone occluder of this many degrees, covering the "
+                              "tripod, stick or car roof directly below the rig")
     extract.add_argument("--no-resume", action="store_true",
                          help="ignore and clear resume markers, redo everything")
     extract.add_argument("--dry-run", action="store_true",

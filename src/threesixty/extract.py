@@ -42,12 +42,26 @@ class ExtractResult:
     """What happened, in enough detail to report honestly."""
 
     images_written: int = 0
+    masks_written: int = 0
     cameras_done: int = 0
     cameras_skipped: int = 0
     passes_run: int = 0
     elapsed: float = 0.0
     cancelled: bool = False
     directories: list[Path] = field(default_factory=list)
+
+
+def _write_sidecars(plan: ExtractPlan, job) -> int:
+    """Link this camera's mask beside each of its images, if masking is in sidecar mode."""
+    mask_plan = getattr(plan, "mask_plan", None)
+    if mask_plan is None or mask_plan.mode != "sidecar" or job.mask_directory is None:
+        return 0
+    mask = mask_plan.camera_masks.get(job.camera.name)
+    if mask is None:
+        return 0
+
+    from .mask.apply import link_sidecars
+    return link_sidecars(mask, job.directory, job.mask_directory)
 
 
 def _count_outputs(directory: Path, pattern: str) -> int:
@@ -164,6 +178,11 @@ def run_extraction(
             result.cameras_done += 1
             if job.directory not in result.directories:
                 result.directories.append(job.directory)
+
+            # Sidecars are written once the images exist, because there has to be one
+            # mask file per image for Brush to pair them up.
+            result.masks_written += _write_sidecars(plan, job)
+
             if written:
                 job.marker.write_text(
                     f"images={written}\ncamera={job.camera.name}\n", encoding="utf-8"

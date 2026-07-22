@@ -7,6 +7,7 @@ framework. Binds to localhost only.
 
 from __future__ import annotations
 
+import base64
 import json
 import subprocess
 import tempfile
@@ -19,6 +20,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import picker
+from ..mask import geometric
 from ..extract import run_extraction
 from ..ffmpeg import FFmpegError, MediaInfo, probe_media, resolve_ffmpeg
 from ..plan import FrameSelection, camera_size, plan_extraction
@@ -169,6 +171,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.api_rig_load(payload))
             elif route.path == "/api/extract":
                 self._json(self.api_extract(payload))
+            elif route.path == "/api/mask/paint":
+                self._json(self.api_mask_paint(payload))
+            elif route.path == "/api/mask/coverage":
+                self._json(self.api_mask_coverage(payload))
             elif route.path == "/api/pick":
                 self._json(self.api_pick(payload))
             elif route.path == "/api/cancel":
@@ -183,6 +189,53 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": str(exc)}, 500)
 
     # -- endpoints ----------------------------------------------------------
+
+    def api_mask_paint(self, payload: dict) -> dict:
+        """Store the painted occluder as an equirect mask file.
+
+        An entirely white image means nothing is painted, so the occluder is dropped
+        rather than written -- otherwise clearing the brush would leave a no-op mask
+        behind that still forces every camera into masked handling.
+        """
+        data = payload.get("image", "")
+        _, _, encoded = data.partition(",")
+        if not encoded:
+            raise ValueError("no image data received")
+
+        raw = base64.b64decode(encoded)
+        target = self.session.cache / "painted_occluder.png"
+        target.write_bytes(raw)
+
+        if geometric.ignored_fraction(self.session.ffmpeg, target) <= 0.0005:
+            target.unlink(missing_ok=True)
+            return {"path": None}
+        return {"path": str(target)}
+
+    def api_mask_coverage(self, payload: dict) -> dict:
+        """Measure what each camera actually loses to the occluders.
+
+        Rendered rather than estimated: a painted occluder is an arbitrary shape with
+        no closed form, and this uses the same projection the extraction will.
+        """
+        rig = rig_from_payload(payload["rig"])
+        width = int(payload.get("source_width") or 4096)
+        height = int(payload.get("source_height") or width // 2)
+
+        occluders = geometric.occluders_of(rig)
+        if not occluders:
+            return {"coverage": {}}
+
+        equirect = geometric.build_equirect_mask(
+            self.session.ffmpeg, occluders, width, height,
+            self.session.cache / "coverage_equirect.png")
+
+        coverage = {}
+        for camera in rig.normalized_cameras():
+            rendered = geometric.render_camera_mask(
+                self.session.ffmpeg, equirect, camera, 160, 120,
+                self.session.cache / f"coverage_{camera.name}.png")
+            coverage[camera.name] = geometric.ignored_fraction(self.session.ffmpeg, rendered)
+        return {"coverage": coverage}
 
     def api_pick(self, payload: dict) -> dict:
         """Raise a native file dialog. The browser cannot supply real paths itself."""
@@ -316,6 +369,7 @@ class Handler(BaseHTTPRequestHandler):
                         resume=bool(payload.get("resume", True)),
                         ffmpeg=session.ffmpeg,
                         on_analysis=lambda note: job.update(message=note),
+                        mask_mode=payload.get("mask_mode", "sidecar"),
                     )
                     if not plan.passes:
                         job.update(message=f"{info.path.name}: already extracted")

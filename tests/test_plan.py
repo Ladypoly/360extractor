@@ -124,20 +124,28 @@ class TestPlanning:
         with pytest.raises(ValueError, match="at least 1"):
             plan_extraction(video, ring(4), FrameSelection(), "out", max_streams=0)
 
-    def test_per_camera_folders(self, video, tmp_path):
-        plan = plan_extraction(video, ring(2), FrameSelection(), tmp_path,
-                               per_camera_folders=True)
+    def test_brush_layout_puts_cameras_under_images(self, video, tmp_path):
+        """Brush and COLMAP both read an images/ root, and Brush requires masks/ to
+        mirror its nested subpaths exactly."""
+        plan = plan_extraction(video, ring(2), FrameSelection(), tmp_path, layout="brush")
+        directories = {j.directory for p in plan.passes for j in p.jobs}
+        assert directories == {tmp_path / "images" / "clip" / "c00",
+                               tmp_path / "images" / "clip" / "c01"}
+
+    def test_mask_directories_mirror_image_directories(self, video, tmp_path):
+        plan = plan_extraction(video, ring(2), FrameSelection(), tmp_path, layout="brush")
+        for job in plan.passes[0].jobs:
+            assert job.directory.relative_to(tmp_path / "images") == \
+                   job.mask_directory.relative_to(tmp_path / "masks")
+
+    def test_flat_layout_keeps_the_older_shape(self, video, tmp_path):
+        plan = plan_extraction(video, ring(2), FrameSelection(), tmp_path, layout="flat")
         directories = {j.directory for p in plan.passes for j in p.jobs}
         assert directories == {tmp_path / "clip" / "c00", tmp_path / "clip" / "c01"}
 
-    def test_flat_layout_shares_one_folder(self, video, tmp_path):
-        plan = plan_extraction(video, ring(2), FrameSelection(), tmp_path,
-                               per_camera_folders=False)
-        directories = {j.directory for p in plan.passes for j in p.jobs}
-        assert directories == {tmp_path / "clip"}
-        # Names must still distinguish the cameras when they share a folder.
-        patterns = {j.pattern for p in plan.passes for j in p.jobs}
-        assert len(patterns) == 2
+    def test_rejects_unknown_layout(self, video, tmp_path):
+        with pytest.raises(ValueError, match="--layout"):
+            plan_extraction(video, ring(2), FrameSelection(), tmp_path, layout="sideways")
 
     def test_estimated_image_count(self, video):
         plan = plan_extraction(video, ring(8), FrameSelection("fps", 2), "out")

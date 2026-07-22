@@ -15,6 +15,11 @@ from . import sharp
 from .ffmpeg import FFmpegInfo, MediaInfo
 from .rig import Camera, Rig, native_size
 
+#: `brush` writes <out>/images/<clip>/<camera>/, which both Brush and COLMAP read and
+#: which lets <out>/masks/<clip>/<camera>/ mirror it exactly -- Brush requires nested
+#: mask directories to match their image directories. `flat` is the older shape.
+LAYOUTS = {"brush", "flat"}
+
 #: Beyond this the filtergraph goes into a script file instead of the command line.
 #: Sharp selection produces one `eq(n,N)` term per kept frame, which on a long clip
 #: runs to tens of kilobytes -- well past what Windows accepts in a command line.
@@ -119,6 +124,9 @@ class CameraJob:
     pattern: str  # ffmpeg image2 pattern, e.g. clip_fwd_%05d.jpg
     width: int = 0
     height: int = 0
+    #: Where this camera's mask sidecars go. Mirrors `directory` with images/ swapped
+    #: for masks/, because Brush matches nested mask paths to nested image paths.
+    mask_directory: Path | None = None
 
     @property
     def output_pattern(self) -> Path:
@@ -152,6 +160,12 @@ class ExtractPlan:
     output_root: Path
     passes: list[Pass] = field(default_factory=list)
     skipped: list[CameraJob] = field(default_factory=list)
+    #: Equirect occluder mask multiplied into the source before the split, when the
+    #: `burn` mask mode is in use. None for every other mode.
+    burn_mask: Path | None = None
+    #: Populated when static occluders were resolved; carries per-camera coverage and
+    #: the rendered masks that `sidecar` links beside the images.
+    mask_plan: "object | None" = None
 
     @property
     def total_cameras(self) -> int:
@@ -167,7 +181,9 @@ class ExtractPlan:
 
 
 def build_filter_graph(cameras: list[Camera], rig: Rig, prefix: str,
-                       sizes: list[tuple[int, int]] | None = None) -> tuple[str, list[str]]:
+                       sizes: list[tuple[int, int]] | None = None,
+                       burn: bool = False,
+                       source_size: tuple[int, int] | None = None) -> tuple[str, list[str]]:
     """Build the filter_complex string and the output label for each camera.
 
     Shape::
@@ -188,13 +204,29 @@ def build_filter_graph(cameras: list[Camera], rig: Rig, prefix: str,
     labels = [f"o{i}" for i in range(count)]
     chains: list[str] = []
 
+    source = "[0:v]"
+    if burn:
+        # Multiply the panorama by the occluder mask once, before the split: cheaper
+        # than blacking out every tile afterwards, and the cameras cannot disagree
+        # about where the occluder was. Done in RGB -- multiplying in YUV would scale
+        # the chroma planes towards 128 and tint the whole image.
+        chains.append(f"[0:v]{prefix + ',' if prefix else ''}format=gbrp[bsrc]")
+        # blend refuses mismatched sizes, so the mask is forced to the source's own
+        # dimensions rather than assumed to be exactly 2:1.
+        scale = f"scale={source_size[0]}:{source_size[1]}," if source_size else ""
+        chains.append(f"[1:v]{scale}format=gbrp[bmask]")
+        # shortest=1 is load-bearing: the mask is fed with -loop 1 and never ends on
+        # its own, so without it the blend runs forever and the extraction hangs.
+        chains.append("[bsrc][bmask]blend=all_mode=multiply:shortest=1[burned]")
+        source, prefix = "[burned]", ""
+
     if count == 1:
-        head = f"[0:v]{prefix}," if prefix else "[0:v]"
+        head = f"{source}{prefix}," if prefix else source
         source_labels = [head]
     else:
         split_labels = "".join(f"[s{i}]" for i in range(count))
-        head = f"[0:v]{prefix},split={count}{split_labels}" if prefix \
-            else f"[0:v]split={count}{split_labels}"
+        head = f"{source}{prefix},split={count}{split_labels}" if prefix \
+            else f"{source}split={count}{split_labels}"
         chains.append(head)
         source_labels = [f"[s{i}]" for i in range(count)]
 
@@ -242,9 +274,16 @@ def build_pass_argv(
         argv += ["-to", f"{selection.end:g}"]
     argv += ["-i", str(plan.media.path)]
 
+    burn = plan.burn_mask is not None
+    if burn:
+        # -loop 1 so the single mask frame lasts as long as the video.
+        argv += ["-loop", "1", "-i", str(plan.burn_mask)]
+
     graph, labels = build_filter_graph(
         single_pass.cameras, rig, selection.filter_prefix(plan.media),
         sizes=[(job.width, job.height) for job in single_pass.jobs],
+        burn=burn,
+        source_size=(plan.media.width, plan.media.height) if burn else None,
     )
     if graph_path is not None and len(graph) > GRAPH_INLINE_LIMIT:
         graph_path.parent.mkdir(parents=True, exist_ok=True)
@@ -273,10 +312,11 @@ def plan_extraction(
     selection: FrameSelection,
     output_root: str | Path,
     max_streams: int = DEFAULT_MAX_STREAMS,
-    per_camera_folders: bool = True,
+    layout: str = "brush",
     resume: bool = False,
     ffmpeg: FFmpegInfo | None = None,
     on_analysis: "callable | None" = None,
+    mask_mode: str = "sidecar",
 ) -> ExtractPlan:
     """Work out the passes needed to extract `media` with `rig`.
 
@@ -302,14 +342,38 @@ def plan_extraction(
     digits = max(5, len(str(selection.estimate_frames(media))) + 1)
     extension = rig.output.format
 
+    # Static occluders are resolved before any frame is extracted, so `skip` can drop
+    # a camera before it costs anything and `burn` can join the filter graph.
+    mask_plan = None
+    if ffmpeg is not None and mask_mode != "none" and rig.occluders:
+        from .mask import apply as mask_apply
+        sizes_by_name = {c.name: camera_size(c, rig, media) for c in rig.normalized_cameras()}
+        mask_plan = mask_apply.prepare(
+            ffmpeg, rig, sizes_by_name, root / ".threesixty" / "masks",
+            mode=mask_mode, source_width=media.width or 4096,
+            source_height=media.height or 0,
+        )
+
     jobs: list[CameraJob] = []
     skipped: list[CameraJob] = []
+    if layout not in LAYOUTS:
+        raise ValueError(f"--layout must be one of {sorted(LAYOUTS)}, got {layout!r}")
+
+    dropped = set(mask_plan.skipped) if mask_plan else set()
+
     for camera in rig.normalized_cameras():
-        directory = root / clip / camera.name if per_camera_folders else root / clip
+        if camera.name in dropped:
+            continue
+        # `brush` puts everything under images/, which is what both Brush and COLMAP
+        # expect, and lets masks/ mirror the same subpaths exactly.
+        directory = root / "images" / clip / camera.name if layout == "brush" \
+            else root / clip / camera.name
         pattern = f"{clip}_{camera.name}_%0{digits}d.{extension}"
         width, height = camera_size(camera, rig, media)
+        mask_directory = (root / "masks" / clip / camera.name) if layout == "brush" \
+            else (root / "masks" / clip / camera.name)
         job = CameraJob(camera=camera, directory=directory, pattern=pattern,
-                        width=width, height=height)
+                        width=width, height=height, mask_directory=mask_directory)
         if resume and job.marker.exists():
             skipped.append(job)
         else:
@@ -327,4 +391,7 @@ def plan_extraction(
         output_root=root,
         passes=passes,
         skipped=skipped,
+        burn_mask=(mask_plan.equirect_mask
+                   if mask_plan and mask_plan.mode == "burn" else None),
+        mask_plan=mask_plan,
     )

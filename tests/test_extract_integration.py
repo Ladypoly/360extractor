@@ -63,8 +63,8 @@ def test_single_pass_matches_separate_runs_byte_for_byte(ffmpeg, equirect_clip, 
     run_extraction(solo, ffmpeg)
 
     for camera in rig.cameras:
-        left = images_in(together / "clip" / camera.name)
-        right = images_in(apart / "clip" / camera.name)
+        left = images_in(together / "images" / "clip" / camera.name)
+        right = images_in(apart / "images" / "clip" / camera.name)
         assert [p.name for p in left] == [p.name for p in right]
         assert [digest(p) for p in left] == [digest(p) for p in right], \
             f"camera {camera.name} differs between batched and solo extraction"
@@ -117,8 +117,8 @@ def test_pitched_camera_differs_from_level_one(ffmpeg, equirect_clip, tmp_path):
     plan = plan_extraction(media, rig, FrameSelection("fps", 1), tmp_path)
     run_extraction(plan, ffmpeg)
 
-    level = images_in(tmp_path / "clip" / "level")[0]
-    down = images_in(tmp_path / "clip" / "down")[0]
+    level = images_in(tmp_path / "images" / "clip" / "level")[0]
+    down = images_in(tmp_path / "images" / "clip" / "down")[0]
     assert digest(level) != digest(down)
 
 

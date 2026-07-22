@@ -106,6 +106,19 @@
   #barfill { height: 100%; width: 0; background: var(--accent); transition: width .25s; }
   #status { font-size: 12px; color: var(--muted); max-width: 46vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+  .tabs { display: flex; gap: 2px; margin-left: auto; }
+  .tab {
+    padding: 5px 13px; border-radius: 5px 5px 0 0; border: 1px solid transparent;
+    border-bottom: 0; background: none; color: var(--muted); font-size: 12px;
+  }
+  .tab.on { background: var(--bg); color: var(--text); border-color: var(--line); font-weight: 600; }
+  .tab:disabled { opacity: .35; }
+  .panel[hidden] { display: none; }
+
+  .tools { display: flex; gap: 5px; align-items: center; flex-wrap: wrap; margin-bottom: 7px; }
+  .tools button.on { background: var(--warn); color: #241a08; border-color: var(--warn); font-weight: 600; }
+  canvas.painting { cursor: cell; }
+
   .hint { color: var(--muted); font-size: 11px; margin: 7px 0 0; }
   .warn { color: var(--warn); } .bad { color: var(--bad); } .good { color: var(--good); }
   #campreview { width: 100%; border-radius: 4px; border: 1px solid var(--line); display: none; }
@@ -119,12 +132,50 @@
   <input id="path" placeholder="no source loaded — click Browse" readonly>
   <button id="browse" class="primary">Browse…</button>
   <span id="media" class="hint" style="margin:0"></span>
+  <div class="tabs">
+    <button class="tab on" data-tab="capture">Capture</button>
+    <button class="tab" data-tab="refine">Refine</button>
+    <button class="tab" data-tab="export">Export</button>
+  </div>
 </header>
 
 <main>
   <div id="stage"><canvas id="canvas" width="1600" height="800"></canvas></div>
 
   <aside>
+   <div class="panel" id="panel-refine" hidden>
+    <section>
+      <h2>Dynamic occluders</h2>
+      <p class="hint" style="margin-top:0">
+        People, passing cars, faces and plates move, so no painted region can catch them.
+        This is where YOLO finds them and SAM 2.1 refines and tracks them across each
+        camera's frames, with the results fused back through the sphere so overlapping
+        cameras agree.
+      </p>
+      <p class="hint">
+        Not built yet — it is the next milestone. Everything on the Capture tab handles the
+        rigid occluders (hood, roof, stick) today, with no ML dependency at all.
+      </p>
+    </section>
+   </div>
+
+   <div class="panel" id="panel-export" hidden>
+    <section>
+      <h2>Export</h2>
+      <p class="hint" style="margin-top:0">
+        The extraction already writes the layout Brush and COLMAP expect:
+        <code>images/</code> with <code>masks/</code> mirroring its subpaths.
+      </p>
+      <p class="hint">
+        Still to come: a COLMAP <code>rig_config.json</code> carrying the exact relative
+        camera rotations and intrinsics. Because these cameras are synthetic, those values
+        are known rather than estimated, so COLMAP only has to solve the rig trajectory —
+        which is what stops panoramic tile sets drifting.
+      </p>
+    </section>
+   </div>
+
+   <div class="panel" id="panel-capture">
     <section>
       <h2>Rig <span class="note" id="camcount"></span></h2>
       <div class="field">
@@ -186,12 +237,39 @@
     </section>
 
     <section>
-      <h2>Occluder guide <span class="note" id="nadirval">off</span></h2>
+      <h2>Occluder <span class="note" id="nadirval">no cone</span></h2>
       <input type="range" id="nadir" min="0" max="89" step="1" value="0" style="width:100%">
-      <p class="hint">
-        Shades everything below the angle — the stick, tripod or car roof — and badges each
-        camera with how much of it falls inside. A design aid; masking arrives in M2.
+      <p class="hint" style="margin-top:4px">
+        Nadir cone — the tripod, stick or car roof directly below the rig.
       </p>
+
+      <div class="tools" style="margin-top:9px">
+        <button id="paint">Paint</button>
+        <button id="erase">Erase</button>
+        <button id="clearpaint" class="ghost">Clear</button>
+      </div>
+      <div class="field">
+        <label for="brush">brush</label>
+        <div class="slider">
+          <input type="range" id="brush" min="4" max="160" step="2" value="40">
+          <output id="brushv">40</output>
+        </div>
+      </div>
+      <p class="hint" style="margin-top:2px">
+        Paint the hood, mount or operator directly onto the panorama. It is rigid relative to
+        the rig, so one painted region covers every frame of the clip.
+      </p>
+
+      <div class="field" style="margin-top:9px">
+        <label for="maskmode">handling</label>
+        <select id="maskmode">
+          <option value="sidecar">mask sidecars</option>
+          <option value="skip">drop covered cameras</option>
+          <option value="burn">burn into images</option>
+          <option value="none">ignore</option>
+        </select>
+      </div>
+      <p class="hint" id="maskhelp" style="margin-top:2px"></p>
     </section>
 
     <section>
@@ -238,6 +316,7 @@
       <h2>Preview <span class="note">what this camera extracts</span></h2>
       <img id="campreview" alt="">
     </section>
+   </div>
   </aside>
 </main>
 
@@ -265,7 +344,22 @@ const state = {
   nadir: 0,
   dragging: null,
   outdirTouched: false,
+  // Painted occluder, kept as its own full-resolution layer so the panorama
+  // underneath is never modified.
+  paint: { mode: null, layer: null, brush: 40, drawing: false, last: null, dirty: false },
 };
+
+/** Offscreen layer the painted occluder lives on, sized to the canvas. */
+function paintLayer() {
+  const layer = state.paint.layer;
+  if (layer && layer.width === canvas.width && layer.height === canvas.height) return layer;
+
+  const fresh = document.createElement("canvas");
+  fresh.width = canvas.width; fresh.height = canvas.height;
+  if (layer) fresh.getContext("2d").drawImage(layer, 0, 0, fresh.width, fresh.height);
+  state.paint.layer = fresh;
+  return fresh;
+}
 
 const $ = (id) => document.getElementById(id);
 const canvas = $("canvas");
@@ -325,6 +419,14 @@ function draw() {
     const x = (yaw + 180) / 360 * W;
     ctx.beginPath(); ctx.moveTo(x, H/2 - 5); ctx.lineTo(x, H/2 + 5); ctx.stroke();
     ctx.fillText(yaw + "°", x + 3, H/2 - 8);
+  }
+
+  // Painted occluder, tinted so it reads as "excluded" rather than as image content.
+  if (state.paint.layer) {
+    ctx.save();
+    ctx.globalAlpha = 0.55;
+    ctx.drawImage(state.paint.layer, 0, 0, W, H);
+    ctx.restore();
   }
 
   if (state.nadir > 0) {
@@ -394,7 +496,11 @@ function renderCameras() {
 
     row.append(dot, name, aim);
 
-    const occluded = occlusionFraction(camera, state.rig.orientation, state.nadir);
+    // Server coverage is measured from the real rendered mask and wins whenever it
+    // exists; the geometric estimate only knows about the cone.
+    const occluded = camera.name in serverCoverage
+      ? serverCoverage[camera.name]
+      : occlusionFraction(camera, state.rig.orientation, state.nadir);
     if (occluded > 0.005) {
       const badge = document.createElement("span");
       badge.className = "camocc";
@@ -517,7 +623,48 @@ function canvasAngles(event) {
   return { yaw: x * 360 - 180, pitch: 90 - y * 180 };
 }
 
+/** Canvas pixel coordinates, independent of how CSS scaled the element. */
+function canvasPixel(event) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (event.clientX - rect.left) / rect.width * canvas.width,
+    y: (event.clientY - rect.top) / rect.height * canvas.height,
+  };
+}
+
+function paintStroke(from, to) {
+  const layer = paintLayer();
+  const paint = layer.getContext("2d");
+  paint.globalCompositeOperation =
+    state.paint.mode === "erase" ? "destination-out" : "source-over";
+  paint.strokeStyle = "#ff8c1a";
+  paint.fillStyle = "#ff8c1a";
+  paint.lineWidth = state.paint.brush;
+  paint.lineCap = "round";
+  paint.lineJoin = "round";
+
+  paint.beginPath();
+  paint.moveTo(from.x, from.y);
+  paint.lineTo(to.x, to.y);
+  paint.stroke();
+  // Wrap the stroke across the seam so an occluder straddling +/-180 stays whole.
+  for (const offset of [-canvas.width, canvas.width]) {
+    paint.beginPath();
+    paint.moveTo(from.x + offset, from.y);
+    paint.lineTo(to.x + offset, to.y);
+    paint.stroke();
+  }
+  state.paint.dirty = true;
+}
+
 canvas.addEventListener("mousedown", (event) => {
+  if (state.paint.mode) {
+    state.paint.drawing = true;
+    state.paint.last = canvasPixel(event);
+    paintStroke(state.paint.last, state.paint.last);
+    draw();
+    return;
+  }
   const at = canvasAngles(event);
   let best = -1, bestDistance = 1e9;
   state.rig.cameras.forEach((camera, index) => {
@@ -535,6 +682,13 @@ canvas.addEventListener("mousedown", (event) => {
 });
 
 window.addEventListener("mousemove", (event) => {
+  if (state.paint.drawing) {
+    const at = canvasPixel(event);
+    paintStroke(state.paint.last, at);
+    state.paint.last = at;
+    draw();
+    return;
+  }
   if (state.dragging === null) return;
   const at = canvasAngles(event);
   const camera = state.rig.cameras[state.dragging];
@@ -544,11 +698,67 @@ window.addEventListener("mousemove", (event) => {
 });
 
 window.addEventListener("mouseup", () => {
+  if (state.paint.drawing) {
+    state.paint.drawing = false;
+    syncPaintedOccluder();
+    return;
+  }
   if (state.dragging === null) return;
   state.dragging = null;
   canvas.classList.remove("dragging");
   refresh(); previewCamera();
 });
+
+/** Send the painted layer to the server and measure real per-camera coverage.
+ *
+ * Coverage shown for a painted occluder is measured from the rendered masks rather
+ * than estimated in the browser: the painted shape is arbitrary, so there is no
+ * closed form to estimate from. */
+let paintTimer = null;
+function syncPaintedOccluder() {
+  if (!state.paint.dirty) return;
+  clearTimeout(paintTimer);
+  paintTimer = setTimeout(async () => {
+    state.paint.dirty = false;
+    const layer = paintLayer();
+
+    // Export as the mask itself: white keeps, black is ignored. Painted -> black.
+    const out = document.createElement("canvas");
+    out.width = layer.width; out.height = layer.height;
+    const octx = out.getContext("2d");
+    octx.fillStyle = "#fff";
+    octx.fillRect(0, 0, out.width, out.height);
+    octx.globalCompositeOperation = "source-over";
+    octx.filter = "brightness(0)";       // any painted colour becomes black
+    octx.drawImage(layer, 0, 0);
+    octx.filter = "none";
+
+    try {
+      const data = await api("/api/mask/paint", { image: out.toDataURL("image/png") });
+      state.rig.occluders = state.rig.occluders.filter((o) => o.type !== "equirect_mask");
+      if (data.path) state.rig.occluders.push({ type: "equirect_mask", path: data.path });
+      await refreshCoverage();
+    } catch (err) {
+      setStatus(err.message, "bad");
+    }
+  }, 350);
+}
+
+let serverCoverage = {};
+async function refreshCoverage() {
+  if (!state.rig.occluders.length) { serverCoverage = {}; renderCameras(); return; }
+  try {
+    const data = await api("/api/mask/coverage", {
+      rig: state.rig,
+      source_width: state.media ? state.media.width : 0,
+      source_height: state.media ? state.media.height : 0,
+    });
+    serverCoverage = data.coverage || {};
+    renderCameras();
+  } catch (err) {
+    setStatus(err.message, "bad");
+  }
+}
 
 // ------------------------------------------------------------- browsing
 
@@ -636,7 +846,7 @@ async function startExtract() {
     await api("/api/extract", {
       sources: [state.media.path], rig: state.rig,
       mode: $("mode").value, value: parseFloat($("modeval").value) || 2,
-      output_dir: outdir, resume: true,
+      output_dir: outdir, resume: true, mask_mode: $("maskmode").value,
     });
     $("extract").disabled = true; $("cancel").disabled = false;
     poll();
@@ -736,9 +946,49 @@ $("caspect").addEventListener("change", () => {
 
 $("nadir").addEventListener("input", () => {
   state.nadir = parseInt($("nadir").value) || 0;
-  $("nadirval").textContent = state.nadir ? "below −" + state.nadir + "°" : "off";
-  state.rig.occluders = state.nadir ? [{ type: "nadir_cone", angle: state.nadir }] : [];
+  $("nadirval").textContent = state.nadir ? "below −" + state.nadir + "°" : "no cone";
+  state.rig.occluders = state.rig.occluders.filter((o) => o.type !== "nadir_cone");
+  if (state.nadir) state.rig.occluders.push({ type: "nadir_cone", angle: state.nadir });
   renderCameras(); draw();
+});
+$("nadir").addEventListener("change", refreshCoverage);
+
+for (const [id, mode] of [["paint", "paint"], ["erase", "erase"]]) {
+  $(id).addEventListener("click", () => {
+    state.paint.mode = state.paint.mode === mode ? null : mode;
+    $("paint").classList.toggle("on", state.paint.mode === "paint");
+    $("erase").classList.toggle("on", state.paint.mode === "erase");
+    canvas.classList.toggle("painting", !!state.paint.mode);
+  });
+}
+$("clearpaint").addEventListener("click", () => {
+  state.paint.layer = null;
+  state.paint.dirty = true;
+  draw();
+  syncPaintedOccluder();
+});
+$("brush").addEventListener("input", () => {
+  state.paint.brush = parseInt($("brush").value) || 40;
+  $("brushv").textContent = state.paint.brush;
+});
+
+const MASK_HELP = {
+  sidecar: "A mask beside every image. No pixels lost — the trainer decides. Best quality.",
+  skip: "Cameras more than two thirds occluded are dropped before extraction.",
+  burn: "The occluder is painted black into the images themselves. Irreversible.",
+  none: "Occluders are recorded in the rig but nothing is masked.",
+};
+$("maskmode").addEventListener("change", () => {
+  $("maskhelp").textContent = MASK_HELP[$("maskmode").value];
+});
+
+document.querySelectorAll(".tab").forEach((tab) => {
+  tab.addEventListener("click", () => {
+    document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("on", t === tab));
+    for (const name of ["capture", "refine", "export"]) {
+      $("panel-" + name).hidden = name !== tab.dataset.tab;
+    }
+  });
 });
 $("mode").addEventListener("change", () => {
   const mode = $("mode").value;
@@ -764,6 +1014,7 @@ window.addEventListener("resize", fitCanvas);
   state.rig = structuredClone(data.presets["ring"]);
   $("ofmt").value = state.rig.output.format;
   $("oq").value = state.rig.output.quality;
+  $("maskhelp").textContent = MASK_HELP[$("maskmode").value];
   refresh(false);
   fitCanvas();
 })();
