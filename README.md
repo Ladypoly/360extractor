@@ -1,11 +1,11 @@
-﻿# 360extract
+# 360extract
 
-Turn 360Â° equirectangular footage into perspective image sets for photogrammetry and
-3D Gaussian Splatting â€” with precise control over **which directions get extracted**, so the
+Turn 360° equirectangular footage into perspective image sets for photogrammetry and
+3D Gaussian Splatting — with precise control over **which directions get extracted**, so the
 person holding the camera or the car it was mounted on never reaches your dataset.
 
 > **Status: pre-1.0 and under active development.** The whole pipeline has been run end to
-> end on real footage â€” see [Verified on real footage](#verified-on-real-footage) â€” and is
+> end on real footage — see [Verified on real footage](#verified-on-real-footage) — and is
 > covered by 525 tests, including tests that drive real COLMAP. Interfaces may still change
 > without notice.
 
@@ -32,14 +32,14 @@ byte-identical to the naive version, so the optimisation can never silently chan
 ## Verified on real footage
 
 A roof-mounted 360 camera on a car driving through a village: 8K equirectangular
-(7680Ã—3840) HEVC, 55 seconds. A 20-second window, 6 cameras at pitch âˆ’10Â°, sharpest frame
+(7680×3840) HEVC, 55 seconds. A 20-second window, 6 cameras at pitch −10°, sharpest frame
 of each half second.
 
 | step | result |
 |---|---|
-| extract | 240 tiles at 1920Ã—1440 from 8K, **31 s** |
-| mask | 25Â° nadir cone, 25% of each camera |
-| COLMAP `rig_configurator` | one rig, 6 cameras, **40 frames Ã— 6** |
+| extract | 240 tiles at 1920×1440 from 8K, **31 s** |
+| mask | 25° nadir cone, 25% of each camera |
+| COLMAP `rig_configurator` | one rig, 6 cameras, **40 frames × 6** |
 | COLMAP `mapper` | **240/240 images registered**, 35,934 points, **0.54 px** mean reprojection error |
 | rig honoured | within-frame camera spread **0.000000** |
 | Brush | 6,000 steps, 318,343 gaussians, 61 s |
@@ -49,7 +49,7 @@ The within-frame spread is the one to look at: all six cameras of a frame came b
 an optical centre *exactly*, which is `--Mapper.ba_refine_sensor_from_rig 0` honouring the
 rig we handed COLMAP rather than re-solving it.
 
-The floor spared nearly twice what it removed â€” that is road surface which would otherwise
+The floor spared nearly twice what it removed — that is road surface which would otherwise
 have been deleted.
 
 ## Requirements
@@ -66,7 +66,7 @@ one. 360extract probes every candidate and picks the newest usable build rather 
 ```
 
 Override discovery with `--ffmpeg /path/to/ffmpeg` or the `THREESIXTY_FFMPEG` environment
-variable. When you name a binary explicitly it is used or the run fails â€” 360extract never
+variable. When you name a binary explicitly it is used or the run fails — 360extract never
 silently substitutes a different one.
 
 ## Install
@@ -80,8 +80,8 @@ pip install -e ".[dev]"     # dev install with tests
 Double-click **`360extract-ui.bat`** (Windows) or run `360extract ui`. It creates the
 virtualenv on first run, checks ffmpeg, and opens a local page on `127.0.0.1:8360`.
 
-**Browseâ€¦** opens a real file dialog. A browser can never hand a server a filesystem path â€”
-`<input type=file>` deliberately hides it â€” so the dialog is raised by the app itself.
+**Browse…** opens a real file dialog. A browser can never hand a server a filesystem path —
+`<input type=file>` deliberately hides it — so the dialog is raised by the app itself.
 
 The panorama fills the window with every camera's footprint drawn on it, so you can see at a
 glance whether the car hood or the person holding the stick falls inside a camera. Drag a
@@ -90,7 +90,7 @@ below it, rather than in a grid of inline number boxes. The selected camera's re
 view is previewed underneath.
 
 The **occluder guide** slider shades everything below a chosen angle and reports what
-percentage of each camera falls inside it â€” the number to watch when deciding whether to
+percentage of each camera falls inside it — the number to watch when deciding whether to
 re-aim a camera or drop it.
 
 The overlay is not decoration: `tests/test_overlay_geometry.py` runs the shipped
@@ -113,7 +113,7 @@ a month, and the settings arrive with the pixels.
 ```
 
 It records **what has already been done**, and each stage stores a fingerprint of the settings
-that produced it â€” so the tool distinguishes "already extracted" from "extracted, but you have
+that produced it — so the tool distinguishes "already extracted" from "extracted, but you have
 since changed the rig":
 
 ```
@@ -127,7 +127,7 @@ The fingerprints are per stage, so changing the detector does not force a re-ext
 changing the rig does. Redoing a stage clears the later ones, which would otherwise claim to be
 current while describing images that no longer exist.
 
-Snapshots are cheap insurance before a big change â€” settings only, no images:
+Snapshots are cheap insurance before a big change — settings only, no images:
 
 ```bash
 360extract project snapshot dataset/ --label before-retilt
@@ -147,7 +147,7 @@ sh dataset/run_colmap.sh                      # COLMAP, then Brush
 
 Because the cameras are synthetic, their relative poses and intrinsics are **known exactly**
 rather than estimated. `rig_config.json` hands COLMAP those known values with
-`--Mapper.ba_refine_sensor_from_rig 0`, so it only has to solve the rig trajectory â€” which is
+`--Mapper.ba_refine_sensor_from_rig 0`, so it only has to solve the rig trajectory — which is
 what stops panoramic tile sets drifting.
 
 Two details that are easy to get wrong and are pinned by tests: COLMAP groups images into
@@ -159,14 +159,14 @@ Verified against COLMAP 4.1.1 itself, not just against our reading of the format
 `rig_configurator` accepts the file, produces **one rig containing every camera**, gathers
 **all cameras into each frame**, and adopts our exact intrinsics with
 `prior_focal_length = 1`. Those tests run whenever COLMAP is installed and skip when it is
-not â€” `pytest -m colmap`.
+not — `pytest -m colmap`.
 
 `360extract doctor` reports which COLMAP it found and whether that build has rig support;
 `--colmap PATH` or `THREESIXTY_COLMAP` override discovery, and the generated script uses the
 binary that was actually found.
 
 A `--gpx` track is worth supplying. It geo-registers the model through `model_aligner`, and
-that similarity transform carries a **uniform scale** â€” which is the only thing that makes a
+that similarity transform carries a **uniform scale** — which is the only thing that makes a
 cleanup radius mean metres rather than arbitrary units.
 
 ### Removing floaters where the rig was
@@ -181,8 +181,8 @@ continuous trail down the middle of the street.
     --radius 2.5 --floor 1.5 --up enu --dry-run
 ```
 
-This works because **Brush does not move the world** â€” its COLMAP loader inverts world-to-cam
-and uses the translation as-is â€” so camera centres and splat coordinates share a frame with no
+This works because **Brush does not move the world** — its COLMAP loader inverts world-to-cam
+and uses the translation as-is — so camera centres and splat coordinates share a frame with no
 alignment step.
 
 Non-destructive: it writes `trained_cleaned.ply` *and* `trained_removed.ply`, so what was
@@ -190,7 +190,7 @@ deleted can be loaded and looked at rather than taken on trust. `--dry-run` repo
 without writing.
 
 **Use `--floor`.** A sphere centred on a roof-mounted rig also reaches the road beneath it, and
-that road is real data â€” the tarmac under the vehicle at time *t* is observed from *t Â± Î”*.
+that road is real data — the tarmac under the vehicle at time *t* is observed from *t ± Δ*.
 Measured on a synthetic street:
 
 | setting | floaters removed | road destroyed |
@@ -200,7 +200,7 @@ Measured on a synthetic street:
 | radius 4.0, no floor | 100% | **53.3%** |
 | radius 4.0, floor 1.5 | 99.4% | **0%** |
 
-The floor needs to know which way is up, and a **straight** capture cannot reveal that â€” a line
+The floor needs to know which way is up, and a **straight** capture cannot reveal that — a line
 is symmetric about its own axis. So on a straight drive it asks for `--up` rather than guessing.
 After geo-registering with `--alignment_type enu` the answer is exactly `--up enu`.
 
@@ -212,7 +212,7 @@ After geo-registering with `--alignment_type enu` the answer is exactly `--up en
 
 Splits the trajectory into overlapping chunks and emits per-chunk commands plus a
 `model_merger` chain. The overlap is the mechanism: `model_merger` aligns neighbours using the
-images they share. **Not yet verified against a real capture** â€” the commands are generated,
+images they share. **Not yet verified against a real capture** — the commands are generated,
 the merge is untested.
 
 ## Rigs
@@ -242,7 +242,7 @@ bolted to a car roof at an angle) without editing each camera individually.
 | Preset | What it is for |
 |---|---|
 | `ring` | N cameras around the horizon. The photogrammetry workhorse. |
-| `cube` | Six 90Â° faces. Complete spherical coverage, no overlap. |
+| `cube` | Six 90° faces. Complete spherical coverage, no overlap. |
 | `dome` | Horizon ring + upper ring + zenith. Everything except the ground. |
 | `car-forward` | Roof-mounted vehicle capture. Forward and sides, tilted down, no rear. |
 | `handheld` | Walking capture on a stick, tilted up to keep the operator out of frame. |
@@ -259,7 +259,7 @@ Presets are accepted anywhere a rig file is, so `--rig ring` works without writi
 
 This is the whole point of the tool, and there are two halves to it.
 
-### Static occluders â€” the stick, the tripod, the car roof
+### Static occluders — the stick, the tripod, the car roof
 
 Rigid relative to the rig, so they sit in the *same region of every single frame*. That is what
 makes them cheap to deal with, and it is why this happens **before** extraction rather than
@@ -272,8 +272,8 @@ The cheapest fix is rig layout: `dome` and `handheld` never point a camera at th
 360extract extract CLIP.mp4 --rig car-forward --nadir 40 --mask sidecar -o dataset/
 ```
 
-`--nadir 40` masks everything more than 40Â° below the horizon. For anything that is not a neat
-cone â€” a hood, a mount arm, a wing mirror â€” paint it directly onto the panorama in the UI.
+`--nadir 40` masks everything more than 40° below the horizon. For anything that is not a neat
+cone — a hood, a mount arm, a wing mirror — paint it directly onto the panorama in the UI.
 
 Paint once, and the same region is pushed through the *identical* `v360` call used for the
 picture, so the per-camera mask is aligned pixel for pixel by construction. One render per
@@ -284,18 +284,18 @@ camera, reused for every frame, rather than one per frame.
 | mode | effect |
 |---|---|
 | `sidecar` | a mask beside every image. No pixels lost, the trainer decides. **Default.** |
-| `skip` | drop cameras more than two thirds occluder â€” not worth extracting, let alone training |
+| `skip` | drop cameras more than two thirds occluder — not worth extracting, let alone training |
 | `burn` | paint it black into the images. For tools that cannot read masks. Irreversible |
 | `none` | record the occluders in the rig, mask nothing |
 
 Cameras the occluder never reaches get no mask file at all: an all-white mask changes nothing
 but still costs a file per frame and needlessly switches that camera into masked handling.
 
-**Mask polarity: white keeps, black is ignored.** Brush, COLMAP and nerfstudio all agree â€”
+**Mask polarity: white keeps, black is ignored.** Brush, COLMAP and nerfstudio all agree —
 Brush copies mask luma straight into the image's alpha (`pixel[3] = mask_pixel[0]`) and treats
 alpha 0 as "do not train here". Getting this backwards silently trains on *only* the car.
 
-### Dynamic occluders â€” people, passing cars, faces and plates
+### Dynamic occluders — people, passing cars, faces and plates
 
 These move, so no painted region can catch them. Detection runs *after* extraction, on the
 rectilinear tiles rather than the panorama: detectors are trained on ordinary photographs and
@@ -311,7 +311,7 @@ pip install -e ".[ml]"
 | `yolo` | finds objects by class on its own. Fast, weights self-download |
 | `sam2.1` | YOLO supplies the prompts, SAM 2.1 sharpens the outlines. **Default** |
 
-**SAM 2.1 has no concept of a "person".** It segments what it is pointed at â€” it is promptable,
+**SAM 2.1 has no concept of a "person".** It segments what it is pointed at — it is promptable,
 not open-vocabulary. So the `sam2.1` backend is YOLO finding *what* to mask and SAM refining
 *exactly where*, which is what it is genuinely better at.
 
@@ -328,8 +328,8 @@ sphere-wide consistency. `--no-fuse` turns it off.
 That reverse projection is done in numpy rather than by ffmpeg, and the reason is worth
 recording: `v360` can map `flat` back to `e`, but it clamps the tile's border pixels outward
 across the whole sphere, so one black pixel at a tile edge would mark half the panorama as
-ignored. Its `alpha_mask` option looks like the fix and is not â€” measured against analytically
-computed frustum coverage it disagrees completely (60Â°Ã—60Â° camera: true coverage 0.052, alpha
+ignored. Its `alpha_mask` option looks like the fix and is not — measured against analytically
+computed frustum coverage it disagrees completely (60°×60° camera: true coverage 0.052, alpha
 0.725; at yaw 90 it reports nothing at all). So the inverse is written out explicitly and
 `tests/test_fuse.py::TestRoundTrip` pins it against `v360`'s forward projection across five
 camera configurations, including the seam and steep pitch.
@@ -338,7 +338,7 @@ camera configurations, including the seam and steep pitch.
 
 The **Refine tab** in the UI drives all of this: pick the backend and classes, run it, then
 step through frames with the mask tinted red over the picture. The preview is composited from
-the mask file that will actually be handed to the trainer, not an approximation â€” worth a look
+the mask file that will actually be handed to the trainer, not an approximation — worth a look
 before committing to a long reconstruction.
 
 #### GPU
@@ -364,7 +364,7 @@ Sampling uniformly in *time* is the right basis for photogrammetry: a capture th
 does not then flood the dataset with near-duplicates from wherever the operator stopped
 walking.
 
-**`--sharp` is usually the better choice.** Uniform sampling is blind to motion blur â€” it
+**`--sharp` is usually the better choice.** Uniform sampling is blind to motion blur — it
 takes whatever frame the tick lands on, and on a walking or driving capture a good share of
 those are smeared. Blurred frames are worse than useless: they contribute no matchable
 features and drag the reconstruction down. `--sharp 2` asks for the same two frames per
@@ -374,7 +374,7 @@ Sharpness comes from ffmpeg's own `blurdetect` filter, so there is no extra depe
 It costs one analysis decode of the source before extraction begins, and reports what it did:
 
 ```
-big360.mp4: analysing sharpnessâ€¦
+big360.mp4: analysing sharpness…
   picked 20 of 300 frames, mean blur 4.45 vs 4.52 across all frames (lower is sharper)
 ```
 
@@ -398,7 +398,7 @@ overlapping cameras must agree about exposure, or feature matching sees two diff
 pictures of the same wall and the trained splat carries the seam. A test asserts two cameras
 aimed the same way come out byte-identical.
 
-The default grade is the identity and emits **no filter at all** â€” an ungraded extraction is
+The default grade is the identity and emits **no filter at all** — an ungraded extraction is
 byte-for-byte what it was before this feature existed, which is also asserted by a test.
 
 Grading is stored in the rig, so it travels with `rig save` and survives switching presets.
@@ -406,12 +406,12 @@ Grading is stored in the rig, so it travels with `rig save` and survives switchi
 ## Output size
 
 By default each camera is written at the source's own pixel density: an equirectangular frame
-carries `width` pixels across 360Â°, so a 90Â° camera gets exactly `width / 4` pixels across.
-A 3840-wide source with a 90Â°Ã—67.5Â° camera yields 960Ã—720.
+carries `width` pixels across 360°, so a 90° camera gets exactly `width / 4` pixels across.
+A 3840-wide source with a 90°×67.5° camera yields 960×720.
 
 Anything smaller throws away detail the capture paid for; anything larger invents it and
 inflates the dataset without adding a single real feature to match. Sizing is per-camera, so
-a 45Â° camera in a mixed rig is not padded out to match a 90Â° one.
+a 45° camera in a mixed rig is not padded out to match a 90° one.
 
 Pass `--width`/`--height` to override with a fixed size for every camera.
 
@@ -425,10 +425,10 @@ dataset/
 ```
 
 This is the layout Brush and COLMAP both read. Brush pairs an image with its mask by mirroring
-the subpath â€” `images/a/b/x.jpg` to `masks/a/b/x.png` â€” and **requires the nested directories to
+the subpath — `images/a/b/x.jpg` to `masks/a/b/x.png` — and **requires the nested directories to
 match**, which is why masks mirror the image tree rather than sitting in one folder.
 
-Use `--layout flat` for the older shape. Sequence numbers are consistent across cameras â€”
+Use `--layout flat` for the older shape. Sequence numbers are consistent across cameras —
 the same number always means the same instant, because every camera receives the identical frame
 set from one split.
 
@@ -440,12 +440,12 @@ finished.
 
 | Milestone | State |
 |---|---|
-| M1 â€” rig format, ffmpeg discovery, extraction | **done** |
-| M2 â€” nadir cones and painted equirect masks | **done** â€” no ML dependency |
-| M3 â€” ML masking (YOLO, SAM 2.1) + sphere fusion | **done** â€” optional `[ml]` extra |
-| M4 â€” COLMAP rig export, GPS, splat cleanup | **done** â€” verified end to end on real footage |
-| M5 â€” rig editor UI | **done** |
-| M6 â€” inpainting | not started |
+| M1 — rig format, ffmpeg discovery, extraction | **done** |
+| M2 — nadir cones and painted equirect masks | **done** — no ML dependency |
+| M3 — ML masking (YOLO, SAM 2.1) + sphere fusion | **done** — optional `[ml]` extra |
+| M4 — COLMAP rig export, GPS, splat cleanup | **done** — verified end to end on real footage |
+| M5 — rig editor UI | **done** |
+| M6 — inpainting | not started |
 
 ## Tests
 
@@ -462,5 +462,5 @@ pass when weights are unavailable.
 
 ## License
 
-Apache-2.0. Model weights for the masking milestone are never vendored â€” they carry their own
+Apache-2.0. Model weights for the masking milestone are never vendored — they carry their own
 licenses and are downloaded separately.
