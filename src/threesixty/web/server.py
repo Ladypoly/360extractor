@@ -1,0 +1,337 @@
+"""A local web UI for designing rigs and running extractions.
+
+Deliberately built on the standard library: the whole point of the rig editor is
+seeing what each camera covers, and that should not require installing a web
+framework. Binds to localhost only.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import tempfile
+import threading
+import traceback
+import webbrowser
+from dataclasses import asdict
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+from ..extract import run_extraction
+from ..ffmpeg import FFmpegError, MediaInfo, probe_media, resolve_ffmpeg
+from ..plan import FrameSelection, plan_extraction
+from ..rig import PRESETS, Camera, Orientation, Output, Rig, RigError
+
+STATIC = Path(__file__).parent / "static"
+PREVIEW_WIDTH = 1600
+
+
+class Job:
+    """A running extraction, polled by the browser."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.state = "idle"  # idle | running | done | error | cancelled
+        self.message = ""
+        self.fraction = 0.0
+        self.images = 0
+        self.thread: threading.Thread | None = None
+        self.cancel = threading.Event()
+
+    def snapshot(self) -> dict:
+        with self.lock:
+            return {
+                "state": self.state,
+                "message": self.message,
+                "fraction": self.fraction,
+                "images": self.images,
+            }
+
+    def update(self, **fields) -> None:
+        with self.lock:
+            for key, value in fields.items():
+                setattr(self, key, value)
+
+
+class Session:
+    """Shared server state: the resolved ffmpeg, preview cache, current job."""
+
+    def __init__(self, ffmpeg) -> None:
+        self.ffmpeg = ffmpeg
+        self.cache = Path(tempfile.mkdtemp(prefix="360extract-ui-"))
+        self.job = Job()
+        self.counter = 0
+        self.lock = threading.Lock()
+
+    def next_name(self, suffix: str) -> Path:
+        with self.lock:
+            self.counter += 1
+            return self.cache / f"p{self.counter:05d}{suffix}"
+
+
+def rig_from_payload(data: dict) -> Rig:
+    """Build a Rig from the browser's JSON, validating it properly."""
+    return Rig.from_dict({
+        "version": data.get("version", 1),
+        "name": data.get("name", "rig"),
+        "cameras": data.get("cameras", []),
+        "output": data.get("output", {}),
+        "orientation": data.get("orientation", {}),
+        "occluders": data.get("occluders", []),
+    })
+
+
+def media_payload(info: MediaInfo) -> dict:
+    payload = asdict(info)
+    payload["path"] = str(info.path)
+    payload["aspect"] = info.aspect
+    payload["looks_equirectangular"] = info.looks_equirectangular
+    return payload
+
+
+class Handler(BaseHTTPRequestHandler):
+    session: Session  # injected by serve()
+
+    server_version = "360extract"
+
+    def log_message(self, fmt, *args):  # noqa: A003 - quieten the default access log
+        return
+
+    # -- plumbing -----------------------------------------------------------
+
+    def _send(self, status: int, body: bytes, content_type: str) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _json(self, payload: dict, status: int = 200) -> None:
+        self._send(status, json.dumps(payload).encode("utf-8"), "application/json")
+
+    def _read_json(self) -> dict:
+        length = int(self.headers.get("Content-Length") or 0)
+        if not length:
+            return {}
+        return json.loads(self.rfile.read(length).decode("utf-8"))
+
+    def _file(self, path: Path, content_type: str) -> None:
+        if not path.exists():
+            self._json({"error": f"not found: {path.name}"}, 404)
+            return
+        self._send(200, path.read_bytes(), content_type)
+
+    # -- routing ------------------------------------------------------------
+
+    def do_GET(self) -> None:  # noqa: N802 - required name
+        route = urlparse(self.path)
+        query = parse_qs(route.query)
+        try:
+            if route.path in ("/", "/index.html"):
+                self._file(STATIC / "index.html", "text/html; charset=utf-8")
+            elif route.path.endswith(".js"):
+                # Served as a module by index.html; the wrong MIME type makes the
+                # browser refuse the import outright.
+                name = Path(route.path).name
+                self._file(STATIC / name, "text/javascript; charset=utf-8")
+            elif route.path == "/api/presets":
+                self._json({"presets": {name: factory().to_dict()
+                                        for name, factory in PRESETS.items()}})
+            elif route.path == "/api/progress":
+                self._json(self.session.job.snapshot())
+            elif route.path.startswith("/preview/"):
+                name = Path(route.path).name
+                self._file(self.session.cache / name, "image/jpeg")
+            else:
+                self._json({"error": "no such endpoint"}, 404)
+        except Exception as exc:  # surface errors in the UI rather than the console
+            traceback.print_exc()
+            self._json({"error": str(exc)}, 500)
+
+    def do_POST(self) -> None:  # noqa: N802 - required name
+        route = urlparse(self.path)
+        try:
+            payload = self._read_json()
+            if route.path == "/api/probe":
+                self._json(self.api_probe(payload))
+            elif route.path == "/api/preview":
+                self._json(self.api_preview(payload))
+            elif route.path == "/api/camera-preview":
+                self._json(self.api_camera_preview(payload))
+            elif route.path == "/api/rig/validate":
+                self._json(self.api_validate(payload))
+            elif route.path == "/api/rig/save":
+                self._json(self.api_rig_save(payload))
+            elif route.path == "/api/rig/load":
+                self._json(self.api_rig_load(payload))
+            elif route.path == "/api/extract":
+                self._json(self.api_extract(payload))
+            elif route.path == "/api/cancel":
+                self.session.job.cancel.set()
+                self._json({"ok": True})
+            else:
+                self._json({"error": "no such endpoint"}, 404)
+        except (FFmpegError, RigError, ValueError) as exc:
+            self._json({"error": str(exc)}, 400)
+        except Exception as exc:
+            traceback.print_exc()
+            self._json({"error": str(exc)}, 500)
+
+    # -- endpoints ----------------------------------------------------------
+
+    def api_probe(self, payload: dict) -> dict:
+        info = probe_media(payload["path"], self.session.ffmpeg)
+        return {"media": media_payload(info)}
+
+    def api_preview(self, payload: dict) -> dict:
+        """One equirect frame, downscaled, for the rig editor canvas."""
+        info = probe_media(payload["path"], self.session.ffmpeg)
+        time = float(payload.get("time", 0.0))
+        target = self.session.next_name(".jpg")
+
+        argv = [str(self.session.ffmpeg.path), "-hide_banner", "-loglevel", "error", "-y"]
+        if info.is_video and time > 0:
+            argv += ["-ss", f"{time:g}"]
+        argv += ["-i", str(info.path), "-vf", f"scale={PREVIEW_WIDTH}:-1",
+                 "-frames:v", "1", "-q:v", "4", str(target)]
+        result = subprocess.run(argv, capture_output=True, text=True, errors="replace")
+        if result.returncode != 0 or not target.exists():
+            raise FFmpegError(f"preview failed: {result.stderr.strip()}")
+
+        return {"url": f"/preview/{target.name}", "media": media_payload(info)}
+
+    def api_camera_preview(self, payload: dict) -> dict:
+        """What a single camera actually sees -- the ground truth for the overlay."""
+        info = probe_media(payload["path"], self.session.ffmpeg)
+        rig = rig_from_payload(payload["rig"])
+        name = payload["camera"]
+
+        matches = [c for c in rig.normalized_cameras() if c.name == name]
+        if not matches:
+            raise RigError(f"no enabled camera named {name!r}")
+        camera = matches[0]
+
+        time = float(payload.get("time", 0.0))
+        width = int(payload.get("width", 480))
+        height = max(int(width / rig.output.aspect), 1)
+        target = self.session.next_name(".jpg")
+
+        argv = [str(self.session.ffmpeg.path), "-hide_banner", "-loglevel", "error", "-y"]
+        if info.is_video and time > 0:
+            argv += ["-ss", f"{time:g}"]
+        argv += [
+            "-i", str(info.path),
+            "-vf", (f"v360=e:rectilinear:yaw={camera.yaw:g}:pitch={camera.pitch:g}:"
+                    f"roll={camera.roll:g}:h_fov={camera.h_fov:g}:v_fov={camera.v_fov:g}:"
+                    f"w={width}:h={height}:interp={rig.output.interp}"),
+            "-frames:v", "1", "-q:v", "4", str(target),
+        ]
+        result = subprocess.run(argv, capture_output=True, text=True, errors="replace")
+        if result.returncode != 0 or not target.exists():
+            raise FFmpegError(f"camera preview failed: {result.stderr.strip()}")
+
+        return {"url": f"/preview/{target.name}"}
+
+    def api_validate(self, payload: dict) -> dict:
+        rig = rig_from_payload(payload["rig"])
+        return {"ok": True, "warnings": rig.warnings(),
+                "enabled": len(rig.enabled_cameras)}
+
+    def api_rig_save(self, payload: dict) -> dict:
+        rig = rig_from_payload(payload["rig"])
+        path = rig.save(payload["path"])
+        return {"path": str(path)}
+
+    def api_rig_load(self, payload: dict) -> dict:
+        return {"rig": Rig.load(payload["path"]).to_dict()}
+
+    def api_extract(self, payload: dict) -> dict:
+        job = self.session.job
+        if job.state == "running":
+            raise ValueError("an extraction is already running")
+
+        rig = rig_from_payload(payload["rig"])
+        sources = payload["sources"]
+        if not sources:
+            raise ValueError("no source files selected")
+        selection = FrameSelection(
+            mode=payload.get("mode", "fps"),
+            value=float(payload.get("value", 2.0)),
+            start=payload.get("start"),
+            end=payload.get("end"),
+        )
+        selection.validate()
+        output_dir = payload.get("output_dir") or "dataset"
+        session = self.session
+
+        def work() -> None:
+            job.cancel.clear()
+            job.update(state="running", message="starting", fraction=0.0, images=0)
+            total = 0
+            try:
+                for index, source in enumerate(sources):
+                    if job.cancel.is_set():
+                        job.update(state="cancelled", message="cancelled")
+                        return
+                    info = probe_media(source, session.ffmpeg)
+                    plan = plan_extraction(info, rig, selection, output_dir,
+                                           resume=bool(payload.get("resume", True)))
+                    if not plan.passes:
+                        job.update(message=f"{info.path.name}: already extracted")
+                        continue
+
+                    def report(progress, index=index, info=info):
+                        if job.cancel.is_set():
+                            raise KeyboardInterrupt
+                        overall = (index + progress.fraction) / len(sources)
+                        job.update(
+                            fraction=overall,
+                            message=f"{info.path.name}: pass "
+                                    f"{progress.pass_index + 1}/{progress.pass_count}, "
+                                    f"frame {progress.frame}",
+                        )
+
+                    result = run_extraction(plan, session.ffmpeg, on_progress=report)
+                    if result.cancelled:
+                        job.update(state="cancelled", message="cancelled")
+                        return
+                    total += result.images_written
+                    job.update(images=total)
+
+                job.update(state="done", fraction=1.0,
+                           message=f"{total} images written to {output_dir}")
+            except KeyboardInterrupt:
+                job.update(state="cancelled", message="cancelled")
+            except Exception as exc:
+                traceback.print_exc()
+                job.update(state="error", message=str(exc))
+
+        job.thread = threading.Thread(target=work, daemon=True)
+        job.thread.start()
+        return {"started": True}
+
+
+def serve(host: str = "127.0.0.1", port: int = 8360, open_browser: bool = True,
+          ffmpeg_path: str | None = None) -> None:
+    """Run the UI until interrupted."""
+    ffmpeg = resolve_ffmpeg(ffmpeg_path)
+    session = Session(ffmpeg)
+
+    handler = type("BoundHandler", (Handler,), {"session": session})
+    server = ThreadingHTTPServer((host, port), handler)
+
+    url = f"http://{host}:{port}/"
+    print(f"360extract UI on {url}")
+    print(f"ffmpeg: {ffmpeg.path} ({ffmpeg.version})")
+    print("press Ctrl+C to stop")
+    if open_browser:
+        threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nstopping")
+    finally:
+        server.server_close()

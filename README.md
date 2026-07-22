@@ -47,6 +47,26 @@ silently substitutes a different one.
 pip install -e ".[dev]"     # dev install with tests
 ```
 
+## The rig editor
+
+Double-click **`360extract-ui.bat`** (Windows) or run `360extract ui`. It creates the
+virtualenv on first run, checks ffmpeg, and opens a local page on `127.0.0.1:8360`.
+
+The panorama is shown with every camera's footprint drawn on it, so you can see at a glance
+whether the car hood or the person holding the stick falls inside a camera. Drag a footprint
+to aim it, and the selected camera's real extracted view is previewed beside the list.
+
+The **occluder guide** slider shades everything below a chosen angle and reports what
+percentage of each camera falls inside it — the number to watch when deciding whether to
+re-aim a camera or drop it.
+
+The overlay is not decoration: `tests/test_overlay_geometry.py` runs the shipped
+`geometry.js` under node, then places markers just inside and just outside each drawn edge
+and checks against real ffmpeg extractions. A UI that draws coverage it does not have is
+worse than no UI, because it hides exactly the occluder you were trying to exclude.
+
+Node is only needed to run those tests, never to use the tool.
+
 ## Rigs
 
 A rig is a JSON file listing the cameras to extract. It is a plain, diffable artifact you can
@@ -140,7 +160,7 @@ finished.
 | M2 — nadir cones and painted equirect masks | not started |
 | M3 — ML masking (YOLO, SAM 2.1, SAM 3) | not started |
 | M4 — GPS/GPX and COLMAP export | not started |
-| M5 — web UI | not started |
+| M5 — rig editor UI | **done** (occluder guide is visual only until M2) |
 | M6 — inpainting | not started |
 
 ## Tests

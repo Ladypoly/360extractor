@@ -204,6 +204,15 @@ def _selection_from_args(args: argparse.Namespace) -> FrameSelection:
     return FrameSelection("fps", args.fps, args.start, args.end)
 
 
+def cmd_ui(args: argparse.Namespace) -> int:
+    """Serve the local rig editor."""
+    from .web.server import serve
+
+    serve(host=args.host, port=args.port, open_browser=not args.no_browser,
+          ffmpeg_path=args.ffmpeg)
+    return 0
+
+
 def cmd_extract(args: argparse.Namespace) -> int:
     ffmpeg = resolve_ffmpeg(args.ffmpeg)
     rig = load_rig(args.rig)
@@ -337,6 +346,12 @@ def build_parser() -> argparse.ArgumentParser:
     rig_show = rig_sub.add_parser("show", help="print a rig as a table")
     rig_show.add_argument("rig", help="rig file or preset name")
     rig_show.set_defaults(func=cmd_rig_show)
+
+    ui = sub.add_parser("ui", help="open the rig editor in a browser")
+    ui.add_argument("--host", default="127.0.0.1", help="bind address (default localhost only)")
+    ui.add_argument("--port", type=int, default=8360)
+    ui.add_argument("--no-browser", action="store_true", help="do not open a browser window")
+    ui.set_defaults(func=cmd_ui)
 
     extract = sub.add_parser("extract", help="extract perspective images from 360 sources")
     extract.add_argument("media", nargs="+", help="360 video or still files")
