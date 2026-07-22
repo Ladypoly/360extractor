@@ -19,3 +19,7 @@ dataset/
 *.pt
 *.pth
 *.onnx
+*.ply
+
+# Brush drops its GPU kernel autotune cache into the working directory
+target/
