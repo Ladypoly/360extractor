@@ -5,9 +5,9 @@ Turn 360° equirectangular footage into perspective image sets for photogrammetr
 person holding the camera or the car it was mounted on never reaches your dataset.
 
 > **Status: pre-1.0 and under active development.** Extraction, masking, COLMAP export and
-> post-training cleanup work and are covered by 480 tests. The COLMAP and Brush steps have
-> not yet been run against a real capture end to end — see the milestone table at the
-> bottom. Interfaces may still change without notice.
+> post-training cleanup work and are covered by 495 tests, including tests that run real
+> COLMAP. Brush training has not yet been driven end to end here. Interfaces may still
+> change without notice.
 
 ```bash
 360extract rig new ring --count 8 -o rigs/ring8.json
@@ -131,6 +131,16 @@ Two details that are easy to get wrong and are pinned by tests: COLMAP groups im
 frames by **matching filenames across camera folders**, which is why files are named
 `00001.jpg` inside `<clip>/<camera>/` rather than carrying the camera name; and the rig must be
 configured *before* matching, because sequential matching pairs images by frame.
+
+Verified against COLMAP 4.1.1 itself, not just against our reading of the format:
+`rig_configurator` accepts the file, produces **one rig containing every camera**, gathers
+**all cameras into each frame**, and adopts our exact intrinsics with
+`prior_focal_length = 1`. Those tests run whenever COLMAP is installed and skip when it is
+not — `pytest -m colmap`.
+
+`360extract doctor` reports which COLMAP it found and whether that build has rig support;
+`--colmap PATH` or `THREESIXTY_COLMAP` override discovery, and the generated script uses the
+binary that was actually found.
 
 A `--gpx` track is worth supplying. It geo-registers the model through `model_aligner`, and
 that similarity transform carries a **uniform scale** — which is the only thing that makes a
@@ -300,6 +310,13 @@ computed frustum coverage it disagrees completely (60°×60° camera: true cover
 0.725; at yaw 90 it reports nothing at all). So the inverse is written out explicitly and
 `tests/test_fuse.py::TestRoundTrip` pins it against `v360`'s forward projection across five
 camera configurations, including the seam and steep pitch.
+
+#### Reviewing the masks
+
+The **Refine tab** in the UI drives all of this: pick the backend and classes, run it, then
+step through frames with the mask tinted red over the picture. The preview is composited from
+the mask file that will actually be handed to the trainer, not an approximation — worth a look
+before committing to a long reconstruction.
 
 #### GPU
 

@@ -9,9 +9,9 @@ tile sets drifting.
 Two conventions have to be bridged, and both are easy to get silently wrong:
 
 * **Axes.** COLMAP cameras are OpenCV: +X right, +Y **down**, +Z forward. This tool is
-  y-up (`mask/fuse.py:camera_basis`). So the rows of `cam_from_rig` are
-  `[right, -up, forward]`. Flip the sign on that middle row and every camera is upside
-  down while the reconstruction still looks superficially fine.
+  y-up (`mask/fuse.py:camera_basis`), and its equirect parameterisation is additionally
+  mirrored with respect to a right-handed world. See `camera_axes_in_rig` -- the
+  reflection is real, expected, and cancels before anything reaches COLMAP.
 * **Filenames.** COLMAP groups images into frames by *matching filenames across camera
   folders*, so every camera's frame N must be called the same thing. That is why the
   brush layout names files `00001.jpg` inside `<clip>/<camera>/` rather than embedding
@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 
 from ..mask.fuse import camera_basis
-from ..rig import Camera, Rig, native_size
+from ..rig import Camera, Rig, output_size
 from .model import ColmapCamera, matrix_to_quaternion, write_cameras_text
 
 #: COLMAP's mapper flag that keeps the rig we hand it, instead of re-solving it.
@@ -118,7 +118,7 @@ def build_rig_config(rig: Rig, clip: str, source_width: int,
             entry["cam_from_rig_translation"] = [0.0, 0.0, 0.0]
 
         if include_intrinsics and source_width:
-            width, height = native_size(source_width, camera.h_fov, camera.v_fov)
+            width, height = output_size(rig.output, camera, source_width)
             entry["camera_model_name"] = "PINHOLE"
             entry["camera_params"] = [
                 focal_from_fov(width, camera.h_fov),
@@ -135,7 +135,7 @@ def build_cameras(rig: Rig, source_width: int) -> dict[int, ColmapCamera]:
     """Intrinsics per camera, as a COLMAP `cameras.txt` would hold them."""
     cameras: dict[int, ColmapCamera] = {}
     for index, camera in enumerate(rig.normalized_cameras(), start=1):
-        width, height = native_size(source_width, camera.h_fov, camera.v_fov)
+        width, height = output_size(rig.output, camera, source_width)
         cameras[index] = ColmapCamera(
             id=index, model="PINHOLE", width=width, height=height,
             params=[focal_from_fov(width, camera.h_fov),
@@ -146,7 +146,7 @@ def build_cameras(rig: Rig, source_width: int) -> dict[int, ColmapCamera]:
 
 
 def build_commands(root: Path, has_masks: bool, geo_registration: bool,
-                   sequential: bool = True) -> str:
+                   sequential: bool = True, colmap: str = "colmap") -> str:
     """The exact command lines for this dataset, in order."""
     root_text = str(root)
     lines = [
@@ -154,7 +154,9 @@ def build_commands(root: Path, has_masks: bool, geo_registration: bool,
         "# Relative camera poses and intrinsics are known exactly, so COLMAP only has",
         "# to solve the rig trajectory.",
         "",
-        "colmap feature_extractor \\",
+        f"COLMAP={colmap!r}".replace("'", '"'),
+        "",
+        "$COLMAP feature_extractor \\",
         f"  --image_path {root_text}/images \\",
         f"  --database_path {root_text}/database.db \\",
         "  --ImageReader.single_camera_per_folder 1 \\",
@@ -166,14 +168,14 @@ def build_commands(root: Path, has_masks: bool, geo_registration: bool,
     lines += [
         "",
         "# Configure the rig BEFORE matching: sequential matching pairs images by frame.",
-        "colmap rig_configurator \\",
+        "$COLMAP rig_configurator \\",
         f"  --database_path {root_text}/database.db \\",
         f"  --rig_config_path {root_text}/rig_config.json",
         "",
-        f"colmap {'sequential' if sequential else 'exhaustive'}_matcher \\",
+        f"$COLMAP {'sequential' if sequential else 'exhaustive'}_matcher \\",
         f"  --database_path {root_text}/database.db",
         "",
-        "colmap mapper \\",
+        "$COLMAP mapper \\",
         f"  --database_path {root_text}/database.db \\",
         f"  --image_path {root_text}/images \\",
         f"  --output_path {root_text}/sparse \\",
@@ -185,7 +187,7 @@ def build_commands(root: Path, has_masks: bool, geo_registration: bool,
             "",
             "# Geo-register: gives the model a real-world scale, which is what makes",
             "# the splat cleanup radius mean metres.",
-            "colmap model_aligner \\",
+            "$COLMAP model_aligner \\",
             f"  --input_path {root_text}/sparse/0 \\",
             f"  --output_path {root_text}/sparse/aligned \\",
             f"  --ref_images_path {root_text}/geo_registration.txt \\",
@@ -203,7 +205,8 @@ def build_commands(root: Path, has_masks: bool, geo_registration: bool,
 
 
 def export(root: str | Path, rig: Rig, clip: str, source_width: int,
-           has_masks: bool = True, geo_registration: bool = False) -> ExportPaths:
+           has_masks: bool = True, geo_registration: bool = False,
+           colmap: str = "colmap") -> ExportPaths:
     """Write rig_config.json, cameras.txt and the command list into `root`."""
     directory = Path(root)
     directory.mkdir(parents=True, exist_ok=True)
@@ -217,8 +220,9 @@ def export(root: str | Path, rig: Rig, clip: str, source_width: int,
                                       directory / "colmap_cameras.txt")
 
     commands = directory / "run_colmap.sh"
-    commands.write_text(build_commands(directory, has_masks, geo_registration),
-                        encoding="utf-8")
+    commands.write_text(
+        build_commands(directory, has_masks, geo_registration, colmap=colmap),
+        encoding="utf-8")
 
     return ExportPaths(rig_config=rig_config, cameras=cameras_path, commands=commands,
                        geo_registration=(directory / "geo_registration.txt")

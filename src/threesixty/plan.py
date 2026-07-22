@@ -13,7 +13,7 @@ from pathlib import Path
 
 from . import sharp
 from .ffmpeg import FFmpegInfo, MediaInfo
-from .rig import Camera, Rig, native_size
+from .rig import Camera, Rig, native_size, output_size
 
 #: `brush` writes <out>/images/<clip>/<camera>/, which both Brush and COLMAP read and
 #: which lets <out>/masks/<clip>/<camera>/ mirror it exactly -- Brush requires nested
@@ -110,9 +110,7 @@ def camera_size(camera: Camera, rig: Rig, media: MediaInfo) -> tuple[int, int]:
     field of view, so a 45-degree camera is not padded out to the same pixel count as
     a 90-degree one. Otherwise the rig's fixed width and height are used for all.
     """
-    if rig.output.auto and media.width:
-        return native_size(media.width, camera.h_fov, camera.v_fov)
-    return rig.output.width, rig.output.height
+    return output_size(rig.output, camera, media.width)
 
 
 @dataclass(frozen=True)

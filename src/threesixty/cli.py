@@ -81,6 +81,23 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             f"\nnote: {len(shadowed)} older ffmpeg build(s) appear earlier on PATH and would "
             f"be picked by `which ffmpeg`. 360extract ignores them and uses the newest usable one."
         )
+
+    from .colmap import locate as colmap_locate
+
+    print("\nCOLMAP (optional, needed to reconstruct):")
+    found = colmap_locate.survey(args.colmap)
+    if not found:
+        print("    not found. Extraction and masking work without it; reconstruction "
+              "does not.")
+    else:
+        chosen_colmap = colmap_locate.resolve(args.colmap)
+        for info in found:
+            mark = "->" if chosen_colmap and info.path == chosen_colmap.path else "  "
+            note = "" if info.usable else f"  [{info.problem}]"
+            cuda = " CUDA" if info.has_cuda else ""
+            print(f" {mark} {info.version}{cuda}\n       {info.path} (via {info.source}){note}")
+        if chosen_colmap:
+            print(f"\n    rig support: yes (rig_configurator present)")
     return 0
 
 
@@ -236,10 +253,16 @@ def cmd_export(args: argparse.Namespace) -> int:
     if args.gpx:
         geo = _write_geo_registration(project, clip, args.gpx, ffmpeg)
 
+    from .colmap import locate as colmap_locate
+    found = colmap_locate.resolve(args.colmap)
+    if found is None:
+        print("note: no usable COLMAP found; the commands will just say `colmap`")
+
     paths = colmap_export.export(
         project.root, project.rig, clip, source_width,
         has_masks=(project.root / "masks").exists(),
         geo_registration=geo is not None,
+        colmap=str(found.path) if found else "colmap",
     )
     print(f"wrote {paths.rig_config.name}, {paths.cameras.name}, {paths.commands.name}")
     if geo:
@@ -653,6 +676,10 @@ def build_parser() -> argparse.ArgumentParser:
         description="Extract perspective image sets from 360 equirectangular footage.",
     )
     parser.add_argument("--version", action="version", version=f"360extract {__version__}")
+    parser.add_argument(
+        "--colmap", metavar="PATH",
+        help="COLMAP binary to use (needs 3.12+ for rig support). Overrides "
+             "THREESIXTY_COLMAP and PATH discovery.")
     parser.add_argument(
         "--ffmpeg", metavar="PATH",
         help=f"ffmpeg binary to use (must be {MIN_MAJOR}.0+ with the v360 filter). "

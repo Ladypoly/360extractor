@@ -154,6 +154,9 @@ class Handler(BaseHTTPRequestHandler):
                                         for name, factory in PRESETS.items()}})
             elif route.path == "/api/progress":
                 self._json(self.session.job.snapshot())
+            elif route.path == "/api/detect/status":
+                from ..mask import ml
+                self._json({"available": ml.available()})
             elif route.path == "/api/project":
                 project = self.session.project
                 self._json({"project": self._project_payload(project)
@@ -185,6 +188,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.api_rig_load(payload))
             elif route.path == "/api/extract":
                 self._json(self.api_extract(payload))
+            elif route.path == "/api/detect/frames":
+                self._json(self.api_detect_frames(payload))
+            elif route.path == "/api/detect/preview":
+                self._json(self.api_detect_preview(payload))
+            elif route.path == "/api/detect/run":
+                self._json(self.api_detect_run(payload))
             elif route.path == "/api/export/colmap":
                 self._json(self.api_export_colmap(payload))
             elif route.path == "/api/splat/clean":
@@ -228,6 +237,120 @@ class Handler(BaseHTTPRequestHandler):
             "detect": asdict(project.detect),
             "stages": {name: project.status(name) for name in STAGES},
         }
+
+    def _open_project(self) -> Project:
+        if self.session.project is None:
+            raise ValueError("no project is open; open or save one on the Capture tab")
+        return self.session.project
+
+    def api_detect_frames(self, payload: dict) -> dict:
+        """What has been extracted, and how much of it already has masks."""
+        from ..mask.dynamic import discover
+
+        project = self._open_project()
+        found = discover(project.root, project.rig)
+        masked = sum(1 for _ in (project.root / "masks").rglob("*.png")) \
+            if (project.root / "masks").exists() else 0
+
+        return {
+            "cameras": [{"name": entry.camera.name,
+                         "frames": sorted(entry.frames)} for entry in found],
+            "masked": masked,
+        }
+
+    def api_detect_preview(self, payload: dict) -> dict:
+        """An extracted frame with its mask tinted over it.
+
+        Composited here rather than in the browser so the preview uses the mask file
+        that will actually be handed to the trainer, not an approximation of it.
+        """
+        from ..mask.dynamic import discover
+
+        project = self._open_project()
+        found = discover(project.root, project.rig)
+        entry = next((e for e in found if e.camera.name == payload["camera"]), None)
+        if entry is None:
+            raise ValueError(f"no camera named {payload['camera']!r}")
+
+        frame = int(payload["frame"])
+        image = entry.frames.get(frame)
+        if image is None:
+            raise ValueError(f"camera {entry.camera.name} has no frame {frame}")
+
+        target = self.session.next_name(".jpg")
+        mask = entry.mask_directory / f"{image.stem}.png"
+        opacity = float(payload.get("opacity", 0.55))
+
+        if mask.exists():
+            # Masked area shown in red: invert the mask so the ignored region is what
+            # gets tinted, then blend it over the picture.
+            graph = (
+                "[1:v]format=gray,negate[m];"
+                "color=red:size=16x16,format=rgba[c];"
+                "[c][0:v]scale2ref[cr][img];"
+                f"[cr][m]alphamerge,colorchannelmixer=aa={opacity:g}[tint];"
+                "[img][tint]overlay,scale=520:-2[out]"
+            )
+            argv = [str(self.session.ffmpeg.path), "-hide_banner", "-loglevel", "error",
+                    "-y", "-i", str(image), "-i", str(mask),
+                    "-filter_complex", graph, "-map", "[out]",
+                    "-frames:v", "1", "-q:v", "4", str(target)]
+        else:
+            argv = [str(self.session.ffmpeg.path), "-hide_banner", "-loglevel", "error",
+                    "-y", "-i", str(image), "-vf", "scale=520:-2",
+                    "-frames:v", "1", "-q:v", "4", str(target)]
+
+        result = subprocess.run(argv, capture_output=True, text=True, errors="replace")
+        if result.returncode != 0 or not target.exists():
+            raise FFmpegError(f"preview failed: {result.stderr.strip()}")
+        return {"url": f"/preview/{target.name}", "has_mask": mask.exists()}
+
+    def api_detect_run(self, payload: dict) -> dict:
+        """Run dynamic masking over the extracted dataset, in the background."""
+        from ..mask import dynamic, ml
+
+        project = self._open_project()
+        job = self.session.job
+        if job.state == "running":
+            raise ValueError("something is already running")
+        if not ml.available():
+            raise ValueError('dynamic masking needs the ML extra: pip install -e ".[ml]"')
+
+        settings = DetectSettings(
+            backend=payload.get("backend", "sam2.1"),
+            classes=list(payload.get("classes") or DetectSettings().classes),
+            confidence=float(payload.get("confidence", 0.25)),
+            dilate=int(payload.get("dilate", 6)),
+            fuse=bool(payload.get("fuse", True)),
+        )
+        project.detect = settings
+        project.save()
+        session = self.session
+
+        def work() -> None:
+            job.cancel.clear()
+            job.update(state="running", message="loading the model", fraction=0.0)
+            try:
+                backend = ml.make_backend(
+                    settings.backend, classes=settings.classes,
+                    confidence=settings.confidence, dilate=settings.dilate,
+                    device=settings.device)
+                report = dynamic.run(
+                    session.ffmpeg, project.root, project.rig, backend,
+                    fuse=settings.fuse,
+                    on_progress=lambda note: job.update(message=note))
+                project.mark_done("mask", masks=report.masks_written,
+                                  detections=report.detections)
+                project.save()
+                job.update(state="done", fraction=1.0, message=report.summary(),
+                           images=report.masks_written)
+            except Exception as exc:
+                traceback.print_exc()
+                job.update(state="error", message=str(exc))
+
+        job.thread = threading.Thread(target=work, daemon=True)
+        job.thread.start()
+        return {"started": True}
 
     def api_export_colmap(self, payload: dict) -> dict:
         """Write rig_config.json, intrinsics and the command list for the open project."""

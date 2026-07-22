@@ -92,6 +92,19 @@ def native_size(source_width: int, h_fov: float, v_fov: float) -> tuple[int, int
     return width, height
 
 
+def output_size(output: "Output", camera: "Camera", source_width: int) -> tuple[int, int]:
+    """The size one camera is actually written at.
+
+    The single source of truth for this. Extraction and the COLMAP export both need it,
+    and when they computed it separately they drifted: the export always assumed
+    automatic sizing, so a rig with a fixed size exported intrinsics that did not match
+    its own images. COLMAP accepts those happily and reconstructs something wrong.
+    """
+    if output.auto and source_width:
+        return native_size(source_width, camera.h_fov, camera.v_fov)
+    return output.width, output.height
+
+
 @dataclass
 class Output:
     """Image dimensions and encoding for extracted frames."""

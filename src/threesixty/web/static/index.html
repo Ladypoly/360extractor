@@ -145,16 +145,72 @@
   <aside>
    <div class="panel" id="panel-refine" hidden>
     <section>
-      <h2>Dynamic occluders</h2>
+      <h2>Dynamic occluders <span class="note" id="mlstatus"></span></h2>
       <p class="hint" style="margin-top:0">
-        People, passing cars, faces and plates move, so no painted region can catch them.
-        This is where YOLO finds them and SAM 2.1 refines and tracks them across each
-        camera's frames, with the results fused back through the sphere so overlapping
-        cameras agree.
+        People and passing cars move, so no painted region can catch them. Detection runs
+        on the extracted tiles, then the results are reconciled through the sphere so
+        overlapping cameras agree.
       </p>
+      <div class="field">
+        <label for="mlbackend">find with</label>
+        <select id="mlbackend">
+          <option value="sam2.1">YOLO + SAM 2.1</option>
+          <option value="yolo">YOLO only</option>
+        </select>
+      </div>
+      <p class="hint" style="margin-top:2px" id="backendnote"></p>
+      <div class="field">
+        <label for="mlclasses">classes</label>
+        <input id="mlclasses" value="person,car,bus,truck,motorcycle,bicycle">
+      </div>
+      <div class="pair">
+        <div class="field"><label for="mlconf">conf</label>
+          <input type="number" id="mlconf" value="0.25" step="0.05" min="0.01" max="0.99"></div>
+        <div class="field"><label for="mldilate">grow</label>
+          <input type="number" id="mldilate" value="6" step="1" min="0"></div>
+      </div>
+      <p class="hint" style="margin-top:2px">
+        Masks are grown a few pixels: segmentation edges sit just inside the object, and a
+        sliver of leftover pedestrian is enough to seed a floater.
+      </p>
+      <div class="field">
+        <label for="mlfuse">sphere</label>
+        <select id="mlfuse">
+          <option value="1">reconcile overlapping cameras</option>
+          <option value="0">keep each camera independent</option>
+        </select>
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <button id="rundetect" class="primary">Detect and mask</button>
+      </div>
+      <p class="hint" id="detectnote"></p>
+    </section>
+
+    <section>
+      <h2>Review <span class="note" id="reviewcount"></span></h2>
+      <div class="field">
+        <label for="reviewcam">camera</label>
+        <select id="reviewcam"></select>
+      </div>
+      <div class="field">
+        <label for="reviewframe">frame</label>
+        <div class="slider">
+          <input type="range" id="reviewframe" min="0" max="0" value="0">
+          <output id="reviewframev">—</output>
+        </div>
+      </div>
+      <img id="reviewimage" alt="" style="width:100%;border:1px solid var(--line);
+           border-radius:4px;display:none">
+      <div class="field" style="margin-top:6px;margin-bottom:0">
+        <label for="maskopacity">overlay</label>
+        <div class="slider">
+          <input type="range" id="maskopacity" min="0" max="100" value="55">
+          <output id="maskopacityv">55%</output>
+        </div>
+      </div>
       <p class="hint">
-        Not built yet — it is the next milestone. Everything on the Capture tab handles the
-        rigid occluders (hood, roof, stick) today, with no ML dependency at all.
+        Red is what will be excluded from training. Check a few frames before committing to
+        a long reconstruction.
       </p>
     </section>
    </div>
@@ -1018,6 +1074,133 @@ async function saveProject(snapshotLabel) {
   }
 }
 
+// ------------------------------------------------------------------ refine
+
+const BACKEND_NOTE = {
+  "sam2.1": "SAM 2.1 is promptable, not open-vocabulary — it has no concept of a " +
+            "\"person\". YOLO finds what to mask, SAM sharpens exactly where.",
+  "yolo": "Fast and self-contained. Coarser outlines than SAM, which the grow setting " +
+          "partly compensates for.",
+};
+
+let review = { cameras: [], frames: [], camera: null };
+
+function showBackendNote() {
+  $("backendnote").textContent = BACKEND_NOTE[$("mlbackend").value] || "";
+}
+
+async function refreshMlStatus() {
+  try {
+    const data = await api("/api/detect/status");
+    $("mlstatus").textContent = data.available ? "ready" : "ML extra not installed";
+    $("mlstatus").className = "note " + (data.available ? "good" : "warn");
+    $("rundetect").disabled = !data.available;
+    if (!data.available) {
+      $("detectnote").textContent = 'Install it with: pip install -e ".[ml]"';
+      $("detectnote").className = "hint warn";
+    }
+  } catch (err) {
+    $("mlstatus").textContent = "unavailable";
+  }
+}
+
+async function refreshReview() {
+  if (!state.project) return;
+  try {
+    const data = await api("/api/detect/frames", {});
+    review.cameras = data.cameras || [];
+    const select = $("reviewcam");
+    select.innerHTML = "";
+    for (const camera of review.cameras) {
+      const option = document.createElement("option");
+      option.value = camera.name;
+      option.textContent = `${camera.name} (${camera.frames.length})`;
+      select.append(option);
+    }
+    $("reviewcount").textContent = data.masked
+      ? `${data.masked} masks on disk` : "no masks yet";
+    if (review.cameras.length) selectReviewCamera(review.cameras[0].name);
+  } catch (err) {
+    $("reviewcount").textContent = err.message;
+  }
+}
+
+function selectReviewCamera(name) {
+  const camera = review.cameras.find((c) => c.name === name);
+  if (!camera) return;
+  review.camera = camera;
+  review.frames = camera.frames;
+  $("reviewframe").max = Math.max(camera.frames.length - 1, 0);
+  $("reviewframe").value = 0;
+  showReviewFrame();
+}
+
+let reviewTimer = null;
+function showReviewFrame() {
+  const index = parseInt($("reviewframe").value) || 0;
+  const frame = review.frames[index];
+  if (frame === undefined || !review.camera) return;
+  $("reviewframev").textContent = frame;
+
+  clearTimeout(reviewTimer);
+  reviewTimer = setTimeout(async () => {
+    try {
+      const data = await api("/api/detect/preview", {
+        camera: review.camera.name, frame,
+        opacity: (parseInt($("maskopacity").value) || 0) / 100,
+      });
+      $("reviewimage").src = data.url;
+      $("reviewimage").style.display = "block";
+    } catch (err) {
+      $("reviewimage").style.display = "none";
+      $("reviewcount").textContent = err.message;
+    }
+  }, 150);
+}
+
+$("mlbackend").addEventListener("change", showBackendNote);
+$("reviewcam").addEventListener("change", () => selectReviewCamera($("reviewcam").value));
+$("reviewframe").addEventListener("input", showReviewFrame);
+$("maskopacity").addEventListener("input", () => {
+  $("maskopacityv").textContent = $("maskopacity").value + "%";
+  showReviewFrame();
+});
+
+$("rundetect").addEventListener("click", async () => {
+  if (!state.project) { setStatus("open a project first", "warn"); return; }
+  $("rundetect").disabled = true;
+  $("detectnote").textContent = "starting…";
+  $("detectnote").className = "hint";
+  try {
+    await api("/api/detect/run", {
+      backend: $("mlbackend").value,
+      classes: $("mlclasses").value.split(",").map((s) => s.trim()).filter(Boolean),
+      confidence: parseFloat($("mlconf").value) || 0.25,
+      dilate: parseInt($("mldilate").value) || 0,
+      fuse: $("mlfuse").value === "1",
+    });
+    pollDetect();
+  } catch (err) {
+    $("detectnote").textContent = err.message;
+    $("detectnote").className = "hint bad";
+    $("rundetect").disabled = false;
+  }
+});
+
+async function pollDetect() {
+  try {
+    const data = await api("/api/progress");
+    $("detectnote").textContent = data.message || data.state;
+    $("barfill").style.width = Math.round(data.fraction * 100) + "%";
+    if (data.state === "running") { setTimeout(pollDetect, 500); return; }
+    $("detectnote").className = "hint " + (data.state === "error" ? "bad" : "good");
+  } catch (err) {
+    $("detectnote").textContent = err.message;
+  }
+  $("rundetect").disabled = false;
+  refreshReview();
+}
+
 // ------------------------------------------------------------------ export
 
 async function pickInto(id, mode, title, kind) {
@@ -1225,6 +1408,9 @@ document.querySelectorAll(".tab").forEach((tab) => {
     for (const name of ["capture", "refine", "export"]) {
       $("panel-" + name).hidden = name !== tab.dataset.tab;
     }
+    // The Refine tab describes what is on disk, so it is refreshed on arrival
+    // rather than kept in sync with a dataset that changes underneath it.
+    if (tab.dataset.tab === "refine") { refreshMlStatus(); refreshReview(); }
   });
 });
 $("mode").addEventListener("change", () => {
