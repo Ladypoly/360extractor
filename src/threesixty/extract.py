@@ -130,6 +130,7 @@ def run_extraction(
     for single_pass in plan.passes:
         for job in single_pass.jobs:
             job.directory.mkdir(parents=True, exist_ok=True)
+            job.marker.parent.mkdir(parents=True, exist_ok=True)
             # A stale marker from an earlier run would otherwise outlive its images.
             job.marker.unlink(missing_ok=True)
 

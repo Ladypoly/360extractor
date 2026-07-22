@@ -161,17 +161,70 @@
 
    <div class="panel" id="panel-export" hidden>
     <section>
-      <h2>Export</h2>
+      <h2>COLMAP project</h2>
       <p class="hint" style="margin-top:0">
-        The extraction already writes the layout Brush and COLMAP expect:
-        <code>images/</code> with <code>masks/</code> mirroring its subpaths.
+        Relative camera rotations and intrinsics are <em>known</em>, not estimated, so
+        COLMAP only has to solve the rig trajectory — which is what stops panoramic tile
+        sets drifting.
       </p>
-      <p class="hint">
-        Still to come: a COLMAP <code>rig_config.json</code> carrying the exact relative
-        camera rotations and intrinsics. Because these cameras are synthetic, those values
-        are known rather than estimated, so COLMAP only has to solve the rig trajectory —
-        which is what stops panoramic tile sets drifting.
+      <div class="field">
+        <label for="gpxpath">GPX</label>
+        <input id="gpxpath" placeholder="optional track">
+        <button id="browsegpx" class="ghost" style="flex:0 0 auto">…</button>
+      </div>
+      <p class="hint" style="margin-top:2px">
+        A track geo-registers the model, which gives it a real scale — that is what makes
+        a cleanup radius mean metres.
       </p>
+      <div class="field" style="margin-top:6px;margin-bottom:0">
+        <button id="writeexport" class="primary">Write COLMAP project</button>
+      </div>
+      <p class="hint" id="exportnote"></p>
+    </section>
+
+    <section>
+      <h2>Remove floaters <span class="note">after training</span></h2>
+      <p class="hint" style="margin-top:0">
+        Nothing constrains the volume the rig itself occupied, so splats collect there in
+        a trail down the street. This deletes them.
+      </p>
+      <div class="field">
+        <label for="splatpath">splat</label>
+        <input id="splatpath" placeholder="trained .ply">
+        <button id="browsesplat" class="ghost" style="flex:0 0 auto">…</button>
+      </div>
+      <div class="field">
+        <label for="sparsepath">sparse</label>
+        <input id="sparsepath" placeholder="sparse/0">
+        <button id="browsesparse" class="ghost" style="flex:0 0 auto">…</button>
+      </div>
+      <div class="field">
+        <label for="cradius">radius</label>
+        <div class="slider">
+          <input type="range" id="cradius" min="0.1" max="10" step="0.1" value="2.5">
+          <output id="cradiusv">2.5</output>
+        </div>
+      </div>
+      <div class="pair">
+        <div class="field"><label for="cfloor">floor</label>
+          <input type="number" id="cfloor" step="0.5" placeholder="off"></div>
+        <div class="field"><label for="cup">up</label>
+          <select id="cup">
+            <option value="">auto</option>
+            <option value="enu">enu (+Z)</option>
+            <option value="y">+Y</option>
+            <option value="z">+Z</option>
+          </select></div>
+      </div>
+      <p class="hint" style="margin-top:2px">
+        A sphere on a roof-mounted rig also reaches the road below it. The floor spares
+        anything further down than this, which costs almost no floater removal.
+      </p>
+      <div class="field" style="margin-top:6px">
+        <button id="previewclean">Preview</button>
+        <button id="runclean" class="primary">Clean</button>
+      </div>
+      <p class="hint" id="cleannote"></p>
     </section>
    </div>
 
@@ -964,6 +1017,63 @@ async function saveProject(snapshotLabel) {
     setStatus(err.message, "bad");
   }
 }
+
+// ------------------------------------------------------------------ export
+
+async function pickInto(id, mode, title, kind) {
+  try {
+    const paths = await pick(mode, title, kind, $(id).value);
+    if (paths.length) $(id).value = paths[0];
+  } catch (err) { setStatus(err.message, "bad"); }
+}
+
+$("browsegpx").addEventListener("click", () =>
+  pickInto("gpxpath", "open", "Select a GPX track", "media"));
+$("browsesplat").addEventListener("click", () =>
+  pickInto("splatpath", "open", "Select the trained .ply", "media"));
+$("browsesparse").addEventListener("click", () =>
+  pickInto("sparsepath", "directory", "Select the COLMAP sparse model", "media"));
+
+$("cradius").addEventListener("input", () =>
+  $("cradiusv").textContent = parseFloat($("cradius").value).toFixed(1));
+
+$("writeexport").addEventListener("click", async () => {
+  if (!state.project) { setStatus("open or save a project first", "warn"); return; }
+  try {
+    const data = await api("/api/export/colmap", { gpx: $("gpxpath").value.trim() });
+    $("exportnote").textContent = "wrote " + data.written.join(", ");
+    $("exportnote").className = "hint good";
+    setStatus("COLMAP project written", "good");
+  } catch (err) {
+    $("exportnote").textContent = err.message;
+    $("exportnote").className = "hint bad";
+  }
+});
+
+async function runCleanup(dryRun) {
+  const splat = $("splatpath").value.trim();
+  const sparse = $("sparsepath").value.trim();
+  if (!splat || !sparse) { setStatus("choose the splat and the sparse model", "warn"); return; }
+  const floor = $("cfloor").value.trim();
+  try {
+    const data = await api("/api/splat/clean", {
+      splat, sparse,
+      radius: parseFloat($("cradius").value),
+      floor: floor === "" ? null : parseFloat(floor),
+      up: $("cup").value || null,
+      dry_run: dryRun,
+    });
+    $("cleannote").innerHTML = data.report.join("<br>");
+    $("cleannote").className = "hint";
+    setStatus(dryRun ? "preview only" : "cleaned", "good");
+  } catch (err) {
+    $("cleannote").textContent = err.message;
+    $("cleannote").className = "hint bad";
+  }
+}
+
+$("previewclean").addEventListener("click", () => runCleanup(true));
+$("runclean").addEventListener("click", () => runCleanup(false));
 
 // ----------------------------------------------------------------- wire
 

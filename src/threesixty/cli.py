@@ -28,7 +28,7 @@ from .ffmpeg import (
     survey_ffmpeg,
 )
 from .mask import apply as mask_apply
-from .plan import DEFAULT_MAX_STREAMS, FrameSelection, plan_extraction
+from .plan import DEFAULT_MAX_STREAMS, FrameSelection, plan_extraction, safe_stem
 from .project import STAGES, Project, ProjectError
 from .rig import PRESETS, Output, Rig, RigError, cube, dome, handheld, ring, car_forward
 
@@ -215,6 +215,156 @@ def _selection_from_args(args: argparse.Namespace) -> FrameSelection:
     if args.all_frames:
         return FrameSelection("all", 0.0, args.start, args.end)
     return FrameSelection("fps", args.fps, args.start, args.end)
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    """Write the COLMAP project for an extracted dataset."""
+    from .colmap import export as colmap_export
+    from .ffmpeg import probe_media as _probe
+
+    project = Project.load(args.directory)
+    ffmpeg = resolve_ffmpeg(args.ffmpeg)
+
+    sources = project.resolved_sources()
+    if not sources:
+        _err("this project has no sources, so there is nothing to describe")
+        return 1
+    clip = safe_stem(sources[0].stem)
+    source_width = _probe(sources[0], ffmpeg).width
+
+    geo = None
+    if args.gpx:
+        geo = _write_geo_registration(project, clip, args.gpx, ffmpeg)
+
+    paths = colmap_export.export(
+        project.root, project.rig, clip, source_width,
+        has_masks=(project.root / "masks").exists(),
+        geo_registration=geo is not None,
+    )
+    print(f"wrote {paths.rig_config.name}, {paths.cameras.name}, {paths.commands.name}")
+    if geo:
+        print(f"wrote {geo.name} ({args.gpx})")
+    print(f"\nRun the pipeline with:\n  sh {paths.commands}")
+
+    project.mark_done("export", rig_config=str(paths.rig_config))
+    project.save()
+    return 0
+
+
+def _write_geo_registration(project, clip: str, gpx_path: str, ffmpeg):
+    """Turn a GPX track into COLMAP's geo-registration reference file."""
+    from . import gps
+    from .colmap import export as colmap_export
+
+    fixes = gps.read_gpx(gpx_path)
+    images_root = project.root / "images" / clip
+    if not images_root.exists():
+        raise ValueError(f"{images_root} does not exist; extract before exporting")
+
+    selection = FrameSelection(mode=project.frames.mode, value=project.frames.value,
+                              start=project.frames.start, end=project.frames.end)
+    per_second = selection.value if selection.mode in {"fps", "sharp"} else 1.0
+    start = selection.start or 0.0
+
+    entries = {}
+    for camera_dir in sorted(p for p in images_root.iterdir() if p.is_dir()):
+        for image in sorted(camera_dir.iterdir()):
+            if image.suffix.lower() not in {".jpg", ".jpeg", ".png"}:
+                continue
+            number = dynamic_frame_number(image)
+            offset = start + (number - 1) / max(per_second, 1e-6)
+            name = f"{clip}/{camera_dir.name}/{image.name}"
+            entries[name] = gps.interpolate(fixes, fixes[0].time + offset)
+
+    return gps.write_geo_registration(entries, project.root / "geo_registration.txt")
+
+
+def dynamic_frame_number(path: Path) -> int:
+    from .mask.dynamic import frame_number
+    return frame_number(path)
+
+
+def cmd_clean_splat(args: argparse.Namespace) -> int:
+    """Remove floaters from the volume the rig itself occupied."""
+    from .colmap.model import read_model
+    from .splat import clean as splat_clean
+    from .splat import ply
+
+    model = read_model(args.sparse)
+    trajectory = splat_clean.trajectory_from_model(model)
+    splats = ply.read(args.splat)
+    print(ply.describe(splats))
+
+    radius = args.radius
+    if args.radius_in_spacings:
+        radius = args.radius_in_spacings * trajectory.median_spacing
+        print(f"radius {radius:.3f} = {args.radius_in_spacings} x median frame spacing")
+
+    up = None
+    if args.up:
+        # After `model_aligner --alignment_type enu` the model is East-North-Up, so up
+        # is exactly +Z. That is the one case where the answer is known rather than
+        # guessed, and it is the usual one when a GPX was supplied.
+        named = {"enu": [0.0, 0.0, 1.0], "y": [0.0, 1.0, 0.0], "z": [0.0, 0.0, 1.0]}
+        if args.up.lower() in named:
+            up = named[args.up.lower()]
+        else:
+            try:
+                parts = [float(v) for v in args.up.replace(" ", "").split(",")]
+            except ValueError:
+                parts = []
+            if len(parts) != 3:
+                _err(f"--up takes 'enu', 'y', 'z', or three numbers like 0,1,0; "
+                     f"got {args.up!r}")
+                return 1
+            up = parts
+
+    kept, removed, report = splat_clean.clean(splats, trajectory, radius,
+                                              args.floor, up)
+    for line in report.lines():
+        print(f"  {line}")
+
+    if args.dry_run:
+        print("\ndry run: nothing written")
+        return 0
+
+    output = Path(args.output) if args.output else Path(args.splat).with_name(
+        Path(args.splat).stem + "_cleaned.ply")
+    ply.write(kept, output)
+    print(f"\nwrote {output}")
+
+    if not args.no_removed:
+        removed_path = output.with_name(output.stem.replace("_cleaned", "") + "_removed.ply")
+        ply.write(removed, removed_path)
+        print(f"wrote {removed_path} -- load it to see exactly what was taken out")
+    return 0
+
+
+def cmd_batches(args: argparse.Namespace) -> int:
+    """Plan a batched reconstruction for a long capture."""
+    from .colmap import batches as batch_module
+    from .mask.dynamic import discover
+
+    project = Project.load(args.directory)
+    found = discover(project.root, project.rig)
+    if not found:
+        _err("no extracted images found; run `360extract run` first")
+        return 1
+
+    frames = sorted(found[0].frames)
+    plan = batch_module.plan_batches(frames, args.chunk, args.overlap)
+    print(plan.summary())
+
+    clip = found[0].directory.parent.name
+    cameras = [entry.camera.name for entry in found]
+    written = batch_module.write_image_lists(plan, project.root, clip, cameras,
+                                             extension=project.rig.output.format)
+    commands = project.root / "batches" / "run_batches.sh"
+    commands.write_text(batch_module.build_commands(plan, project.root), encoding="utf-8")
+
+    print(f"wrote {len(written)} image lists and {commands}")
+    print("note: the merge step is untested against a real capture -- see the README")
+    return 0
 
 
 def cmd_project_new(args: argparse.Namespace) -> int:
@@ -574,6 +724,52 @@ def build_parser() -> argparse.ArgumentParser:
     project_snap.add_argument("--restore", metavar="LABEL",
                               help="restore this snapshot instead of saving one")
     project_snap.set_defaults(func=cmd_project_snapshot)
+
+    export_parser = sub.add_parser(
+        "export", help="write the COLMAP project (rig, intrinsics, commands)")
+    export_parser.add_argument("directory", nargs="?", default=".")
+    export_parser.add_argument("--gpx", metavar="FILE",
+                               help="GPX track for the capture; writes COLMAP's "
+                                    "geo-registration file, which gives the model a real "
+                                    "scale and makes cleanup radii mean metres")
+    export_parser.set_defaults(func=cmd_export)
+
+    clean = sub.add_parser(
+        "clean-splat",
+        help="delete gaussians at the recorded camera positions, where floaters collect")
+    clean.add_argument("splat", help="the trained .ply")
+    clean.add_argument("--sparse", required=True,
+                       help="COLMAP sparse model directory, e.g. dataset/sparse/0")
+    radius_group = clean.add_mutually_exclusive_group(required=True)
+    radius_group.add_argument("--radius", type=float,
+                              help="removal radius in model units (metres once the "
+                                   "model is geo-registered)")
+    radius_group.add_argument("--radius-in-spacings", type=float, metavar="N",
+                              help="removal radius as N x the median distance between "
+                                   "frames; use when the model has no real scale")
+    clean.add_argument("--floor", type=float, metavar="D",
+                       help="spare anything more than D below the rig, so the road "
+                            "under the vehicle survives")
+    clean.add_argument("--up", metavar="DIR",
+                       help="which way is up: 'enu' after geo-registering with "
+                            "--alignment_type enu, otherwise 'y', 'z', or X,Y,Z. "
+                            "Needed for --floor on a straight capture, since a line "
+                            "cannot reveal its own vertical")
+    clean.add_argument("-o", "--output", help="output .ply (default <name>_cleaned.ply)")
+    clean.add_argument("--no-removed", action="store_true",
+                       help="do not also write the removed gaussians")
+    clean.add_argument("--dry-run", action="store_true",
+                       help="report what would be removed and write nothing")
+    clean.set_defaults(func=cmd_clean_splat)
+
+    batches = sub.add_parser(
+        "batches", help="plan a batched reconstruction for a long capture")
+    batches.add_argument("directory", nargs="?", default=".")
+    batches.add_argument("--chunk", type=int, default=300, help="frames per chunk")
+    batches.add_argument("--overlap", type=int, default=40,
+                         help="frames shared with the next chunk; this is what lets "
+                              "model_merger align them")
+    batches.set_defaults(func=cmd_batches)
 
     run = sub.add_parser(
         "run", help="extract and mask a project, skipping what is already current")

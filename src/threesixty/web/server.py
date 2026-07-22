@@ -185,6 +185,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.api_rig_load(payload))
             elif route.path == "/api/extract":
                 self._json(self.api_extract(payload))
+            elif route.path == "/api/export/colmap":
+                self._json(self.api_export_colmap(payload))
+            elif route.path == "/api/splat/clean":
+                self._json(self.api_splat_clean(payload))
             elif route.path == "/api/project/open":
                 self._json(self.api_project_open(payload))
             elif route.path == "/api/project/save":
@@ -224,6 +228,89 @@ class Handler(BaseHTTPRequestHandler):
             "detect": asdict(project.detect),
             "stages": {name: project.status(name) for name in STAGES},
         }
+
+    def api_export_colmap(self, payload: dict) -> dict:
+        """Write rig_config.json, intrinsics and the command list for the open project."""
+        from ..colmap import export as colmap_export
+        from ..plan import safe_stem
+
+        project = self.session.project
+        if project is None:
+            raise ValueError("no project is open")
+        sources = project.resolved_sources()
+        if not sources:
+            raise ValueError("this project has no sources, so there is nothing to describe")
+
+        clip = safe_stem(sources[0].stem)
+        width = probe_media(sources[0], self.session.ffmpeg).width
+
+        geo_path = None
+        gpx = (payload.get("gpx") or "").strip()
+        if gpx:
+            geo_path = self._write_geo(project, clip, gpx)
+
+        paths = colmap_export.export(
+            project.root, project.rig, clip, width,
+            has_masks=(project.root / "masks").exists(),
+            geo_registration=geo_path is not None,
+        )
+        written = [paths.rig_config.name, paths.cameras.name, paths.commands.name]
+        if geo_path:
+            written.append(geo_path.name)
+
+        project.mark_done("export", rig_config=str(paths.rig_config))
+        project.save()
+        return {"written": written}
+
+    def _write_geo(self, project, clip: str, gpx: str) -> Path:
+        from .. import gps
+        from ..mask.dynamic import frame_number
+
+        fixes = gps.read_gpx(gpx)
+        images_root = project.root / "images" / clip
+        if not images_root.exists():
+            raise ValueError(f"{images_root} does not exist; extract first")
+
+        per_second = project.frames.value if project.frames.mode in {"fps", "sharp"} else 1.0
+        start = project.frames.start or 0.0
+
+        entries = {}
+        for camera_dir in sorted(p for p in images_root.iterdir() if p.is_dir()):
+            for image in sorted(camera_dir.iterdir()):
+                if image.suffix.lower() not in {".jpg", ".jpeg", ".png"}:
+                    continue
+                offset = start + (frame_number(image) - 1) / max(per_second, 1e-6)
+                entries[f"{clip}/{camera_dir.name}/{image.name}"] = gps.interpolate(
+                    fixes, fixes[0].time + offset)
+        return gps.write_geo_registration(entries, project.root / "geo_registration.txt")
+
+    def api_splat_clean(self, payload: dict) -> dict:
+        """Preview or perform the floater removal."""
+        from ..colmap.model import read_model
+        from ..splat import clean as splat_clean
+        from ..splat import ply
+
+        splat_path = Path(payload["splat"])
+        model = read_model(payload["sparse"])
+        trajectory = splat_clean.trajectory_from_model(model)
+        splats = ply.read(splat_path)
+
+        named = {"enu": [0.0, 0.0, 1.0], "y": [0.0, 1.0, 0.0], "z": [0.0, 0.0, 1.0]}
+        up = named.get((payload.get("up") or "").lower())
+
+        kept, removed, report = splat_clean.clean(
+            splats, trajectory, float(payload["radius"]),
+            payload.get("floor"), up)
+
+        lines = [ply.describe(splats)] + report.lines()
+        if payload.get("dry_run"):
+            return {"report": lines + ["preview only, nothing written"]}
+
+        cleaned_path = splat_path.with_name(splat_path.stem + "_cleaned.ply")
+        removed_path = splat_path.with_name(splat_path.stem + "_removed.ply")
+        ply.write(kept, cleaned_path)
+        ply.write(removed, removed_path)
+        return {"report": lines + [f"wrote {cleaned_path.name} and {removed_path.name}"]}
 
     def api_project_new(self, payload: dict) -> dict:
         project = Project.create(

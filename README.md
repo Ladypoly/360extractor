@@ -4,9 +4,10 @@ Turn 360° equirectangular footage into perspective image sets for photogrammetr
 3D Gaussian Splatting — with precise control over **which directions get extracted**, so the
 person holding the camera or the car it was mounted on never reaches your dataset.
 
-> **Status: pre-1.0 and under active development.** Extraction, masking and the rig editor
-> work and are covered by 365 tests. Export to COLMAP and Brush is not built yet — see the
-> milestone table at the bottom. Interfaces may still change without notice.
+> **Status: pre-1.0 and under active development.** Extraction, masking, COLMAP export and
+> post-training cleanup work and are covered by 480 tests. The COLMAP and Brush steps have
+> not yet been run against a real capture end to end — see the milestone table at the
+> bottom. Interfaces may still change without notice.
 
 ```bash
 360extract rig new ring --count 8 -o rigs/ring8.json
@@ -113,6 +114,73 @@ Snapshots are cheap insurance before a big change — settings only, no images:
 The painted occluder lives in `assets/` inside the project, so it survives a reboot.
 
 `360extract ui --project dataset/` opens straight into one.
+
+## Reconstructing and training
+
+```bash
+360extract export dataset/ --gpx track.gpx    # rig_config.json, intrinsics, commands
+sh dataset/run_colmap.sh                      # COLMAP, then Brush
+```
+
+Because the cameras are synthetic, their relative poses and intrinsics are **known exactly**
+rather than estimated. `rig_config.json` hands COLMAP those known values with
+`--Mapper.ba_refine_sensor_from_rig 0`, so it only has to solve the rig trajectory — which is
+what stops panoramic tile sets drifting.
+
+Two details that are easy to get wrong and are pinned by tests: COLMAP groups images into
+frames by **matching filenames across camera folders**, which is why files are named
+`00001.jpg` inside `<clip>/<camera>/` rather than carrying the camera name; and the rig must be
+configured *before* matching, because sequential matching pairs images by frame.
+
+A `--gpx` track is worth supplying. It geo-registers the model through `model_aligner`, and
+that similarity transform carries a **uniform scale** — which is the only thing that makes a
+cleanup radius mean metres rather than arbitrary units.
+
+### Removing floaters where the rig was
+
+Masking keeps the vehicle out of the *images*. It cannot stop a trainer putting gaussians
+**where the rig was**: no camera sees that volume from any distance, so anything placed there
+explains away residual error and nothing contradicts it. On a drive-through they form a
+continuous trail down the middle of the street.
+
+```bash
+360extract clean-splat trained.ply --sparse dataset/sparse/0 \
+    --radius 2.5 --floor 1.5 --up enu --dry-run
+```
+
+This works because **Brush does not move the world** — its COLMAP loader inverts world-to-cam
+and uses the translation as-is — so camera centres and splat coordinates share a frame with no
+alignment step.
+
+Non-destructive: it writes `trained_cleaned.ply` *and* `trained_removed.ply`, so what was
+deleted can be loaded and looked at rather than taken on trust. `--dry-run` reports counts
+without writing.
+
+**Use `--floor`.** A sphere centred on a roof-mounted rig also reaches the road beneath it, and
+that road is real data — the tarmac under the vehicle at time *t* is observed from *t ± Δ*.
+Measured on a synthetic street:
+
+| setting | floaters removed | road destroyed |
+|---|---|---|
+| radius 2.5, no floor | 100% | **19.9%** |
+| radius 2.5, floor 1.5 | 99.4% | **0%** |
+| radius 4.0, no floor | 100% | **53.3%** |
+| radius 4.0, floor 1.5 | 99.4% | **0%** |
+
+The floor needs to know which way is up, and a **straight** capture cannot reveal that — a line
+is symmetric about its own axis. So on a straight drive it asks for `--up` rather than guessing.
+After geo-registering with `--alignment_type enu` the answer is exactly `--up enu`.
+
+### Long captures
+
+```bash
+360extract batches dataset/ --chunk 300 --overlap 40
+```
+
+Splits the trajectory into overlapping chunks and emits per-chunk commands plus a
+`model_merger` chain. The overlap is the mechanism: `model_merger` aligns neighbours using the
+images they share. **Not yet verified against a real capture** — the commands are generated,
+the merge is untested.
 
 ## Rigs
 
@@ -312,7 +380,7 @@ finished.
 | M1 — rig format, ffmpeg discovery, extraction | **done** |
 | M2 — nadir cones and painted equirect masks | **done** — no ML dependency |
 | M3 — ML masking (YOLO, SAM 2.1) + sphere fusion | **done** — optional `[ml]` extra |
-| M4 — Brush/COLMAP rig export | not started |
+| M4 — COLMAP rig export, GPS, splat cleanup | **done** — not yet run against a real capture |
 | M5 — rig editor UI | **done** |
 | M6 — inpainting | not started |
 

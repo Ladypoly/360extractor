@@ -132,6 +132,24 @@ class TestPlanning:
         assert directories == {tmp_path / "images" / "clip" / "c00",
                                tmp_path / "images" / "clip" / "c01"}
 
+    def test_brush_layout_names_frames_identically_across_cameras(self, video, tmp_path):
+        """COLMAP groups images into frames by matching filenames across camera
+        folders, so every camera's frame N must be called the same thing.
+
+        Embedding the camera name in the filename -- which is what the flat layout
+        does -- silently prevents the rig from ever being formed.
+        """
+        plan = plan_extraction(video, ring(3), FrameSelection(), tmp_path, layout="brush")
+        patterns = {j.pattern for p in plan.passes for j in p.jobs}
+        assert len(patterns) == 1, f"cameras must share a filename pattern, got {patterns}"
+        assert patterns.pop().startswith("%0")
+
+    def test_flat_layout_keeps_names_distinct(self, video, tmp_path):
+        """One shared folder needs unique names, so the camera goes back in."""
+        plan = plan_extraction(video, ring(3), FrameSelection(), tmp_path, layout="flat")
+        patterns = {j.pattern for p in plan.passes for j in p.jobs}
+        assert len(patterns) == 3
+
     def test_mask_directories_mirror_image_directories(self, video, tmp_path):
         plan = plan_extraction(video, ring(2), FrameSelection(), tmp_path, layout="brush")
         for job in plan.passes[0].jobs:
@@ -155,7 +173,7 @@ class TestPlanning:
     def test_resume_skips_cameras_with_markers(self, video, tmp_path):
         plan = plan_extraction(video, ring(4), FrameSelection(), tmp_path, resume=True)
         first = plan.passes[0].jobs[0]
-        first.directory.mkdir(parents=True)
+        first.marker.parent.mkdir(parents=True, exist_ok=True)
         first.marker.write_text("images=20\n", encoding="utf-8")
 
         resumed = plan_extraction(video, ring(4), FrameSelection(), tmp_path, resume=True)
@@ -166,7 +184,7 @@ class TestPlanning:
     def test_markers_ignored_without_resume(self, video, tmp_path):
         plan = plan_extraction(video, ring(4), FrameSelection(), tmp_path, resume=True)
         job = plan.passes[0].jobs[0]
-        job.directory.mkdir(parents=True)
+        job.marker.parent.mkdir(parents=True, exist_ok=True)
         job.marker.write_text("images=20\n", encoding="utf-8")
 
         fresh = plan_extraction(video, ring(4), FrameSelection(), tmp_path, resume=False)

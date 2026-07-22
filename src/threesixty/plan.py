@@ -127,6 +127,9 @@ class CameraJob:
     #: Where this camera's mask sidecars go. Mirrors `directory` with images/ swapped
     #: for masks/, because Brush matches nested mask paths to nested image paths.
     mask_directory: Path | None = None
+    #: Resume marker. Kept out of the image folder: COLMAP's feature extractor scans
+    #: that folder, and stray files there are at best noise.
+    marker_path: Path | None = None
 
     @property
     def output_pattern(self) -> Path:
@@ -135,6 +138,8 @@ class CameraJob:
     @property
     def marker(self) -> Path:
         """Written on success so a re-run can skip this camera."""
+        if self.marker_path is not None:
+            return self.marker_path
         return self.directory / f".{self.camera.name}.done"
 
 
@@ -368,12 +373,19 @@ def plan_extraction(
         # expect, and lets masks/ mirror the same subpaths exactly.
         directory = root / "images" / clip / camera.name if layout == "brush" \
             else root / clip / camera.name
-        pattern = f"{clip}_{camera.name}_%0{digits}d.{extension}"
+        # COLMAP groups images into frames by matching filenames *across* camera
+        # folders, so in the brush layout every camera's frame N must be called the
+        # same thing; the camera is identified by its folder. The flat layout puts
+        # every camera in one directory, where names have to stay distinct instead.
+        pattern = f"%0{digits}d.{extension}" if layout == "brush" \
+            else f"{clip}_{camera.name}_%0{digits}d.{extension}"
         width, height = camera_size(camera, rig, media)
         mask_directory = (root / "masks" / clip / camera.name) if layout == "brush" \
             else (root / "masks" / clip / camera.name)
         job = CameraJob(camera=camera, directory=directory, pattern=pattern,
-                        width=width, height=height, mask_directory=mask_directory)
+                        width=width, height=height, mask_directory=mask_directory,
+                        marker_path=root / ".threesixty" / "markers"
+                        / f"{clip}_{camera.name}.done")
         if resume and job.marker.exists():
             skipped.append(job)
         else:

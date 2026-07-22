@@ -154,6 +154,7 @@ def test_failed_pass_leaves_no_completion_marker(ffmpeg, equirect_clip, tmp_path
     plan = plan_extraction(media, rig, FrameSelection("fps", 1), tmp_path)
     job = plan.passes[0].jobs[0]
     job.directory.mkdir(parents=True, exist_ok=True)
+    job.marker.parent.mkdir(parents=True, exist_ok=True)
     job.marker.write_text("stale marker from an earlier run\n", encoding="utf-8")
 
     # Point the plan at a nonexistent source so the pass fails.
