@@ -76,6 +76,11 @@ class Session:
         self.lock = threading.Lock()
         #: The open project, if any. Owns the painted occluder and remembers settings.
         self.project = project
+        #: The most recently decoded panorama frame, *ungraded*. Seeking an 8K source
+        #: costs around 600 ms; regrading this cached frame costs around 50 ms, which
+        #: is what makes the grade sliders usable live.
+        self.preview_source: Path | None = None
+        self.preview_key: tuple | None = None
 
     def next_name(self, suffix: str) -> Path:
         with self.lock:
@@ -205,6 +210,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.api_project_save(payload))
             elif route.path == "/api/project/new":
                 self._json(self.api_project_new(payload))
+            elif route.path == "/api/preview/grade":
+                self._json(self.api_preview_grade(payload))
+            elif route.path == "/api/grade/auto":
+                self._json(self.api_grade_auto(payload))
             elif route.path == "/api/mask/paint":
                 self._json(self.api_mask_paint(payload))
             elif route.path == "/api/mask/coverage":
@@ -563,22 +572,67 @@ class Handler(BaseHTTPRequestHandler):
         time = float(payload.get("time", 0.0))
         target = self.session.next_name(".jpg")
 
-        grade = ""
-        if payload.get("grade"):
-            grade = Grade(**{k: float(v) for k, v in payload["grade"].items()
-                             if k in Grade.LIMITS}).filter_chain()
-
+        # Decode the panorama once and keep it ungraded; grading happens from the
+        # cache, so moving a slider never re-seeks the video.
+        source = self.session.next_name(".jpg")
         argv = [str(self.session.ffmpeg.path), "-hide_banner", "-loglevel", "error", "-y"]
         if info.is_video and time > 0:
             argv += ["-ss", f"{time:g}"]
-        argv += ["-i", str(info.path),
-                 "-vf", (f"{grade}," if grade else "") + f"scale={PREVIEW_WIDTH}:-1",
-                 "-frames:v", "1", "-q:v", "4", str(target)]
+        argv += ["-i", str(info.path), "-vf", f"scale={PREVIEW_WIDTH}:-1",
+                 "-frames:v", "1", "-q:v", "3", str(source)]
         result = subprocess.run(argv, capture_output=True, text=True, errors="replace")
-        if result.returncode != 0 or not target.exists():
+        if result.returncode != 0 or not source.exists():
             raise FFmpegError(f"preview failed: {result.stderr.strip()}")
 
-        return {"url": f"/preview/{target.name}", "media": media_payload(info)}
+        self.session.preview_source = source
+        self.session.preview_key = (str(info.path), time)
+
+        graded = self._regrade(source, payload.get("grade"), PREVIEW_WIDTH, target)
+        return {"url": f"/preview/{graded.name}", "media": media_payload(info)}
+
+    def _regrade(self, source: Path, grade_data, width: int, target: Path) -> Path:
+        """Apply a grade to an already-decoded frame."""
+        grade = ""
+        if grade_data:
+            grade = Grade(**{k: float(v) for k, v in grade_data.items()
+                             if k in Grade.LIMITS}).filter_chain()
+
+        chain = ",".join(filter(None, [grade, f"scale={width}:-2"]))
+        result = subprocess.run(
+            [str(self.session.ffmpeg.path), "-hide_banner", "-loglevel", "error", "-y",
+             "-i", str(source), "-vf", chain, "-frames:v", "1", "-q:v", "4", str(target)],
+            capture_output=True, text=True, errors="replace")
+        if result.returncode != 0 or not target.exists():
+            raise FFmpegError(f"regrade failed: {result.stderr.strip()}")
+        return target
+
+    def api_preview_grade(self, payload: dict) -> dict:
+        """Re-grade the frame already on screen, without touching the video.
+
+        `width` lets the browser ask for a small proxy while a slider is moving and the
+        full-size frame when it is released.
+        """
+        source = self.session.preview_source
+        if source is None or not source.exists():
+            raise ValueError("no preview loaded yet")
+        width = max(64, min(int(payload.get("width", PREVIEW_WIDTH)), PREVIEW_WIDTH))
+        target = self.session.next_name(".jpg")
+        graded = self._regrade(source, payload.get("grade"), width, target)
+        return {"url": f"/preview/{graded.name}", "width": width}
+
+    def api_grade_auto(self, payload: dict) -> dict:
+        """Measure the frame on screen and propose a grade for it."""
+        from .. import autograde
+
+        source = self.session.preview_source
+        if source is None or not source.exists():
+            raise ValueError("load a source first; auto grades what is on screen")
+
+        grade, analysis = autograde.auto_grade(self.session.ffmpeg, source)
+        return {
+            "grade": asdict(grade),
+            "notes": autograde.describe(analysis, grade),
+        }
 
     def api_camera_preview(self, payload: dict) -> dict:
         """What a single camera actually sees -- the ground truth for the overlay."""

@@ -568,10 +568,45 @@ def cmd_ui(args: argparse.Namespace) -> int:
     return 0
 
 
+def _grade_sample(source: str, ffmpeg, selection: FrameSelection) -> Path:
+    """One frame from partway into the clip, for auto-grade to measure.
+
+    Taken from the middle of the chosen range rather than the first frame: the opening
+    of a clip is often still auto-exposing, or the vehicle has not moved yet.
+    """
+    import subprocess
+    import tempfile
+
+    media = probe_media(source, ffmpeg)
+    start = selection.start or 0.0
+    end = selection.end if selection.end is not None else (media.duration or 0.0)
+    middle = start + max(end - start, 0.0) / 2.0
+
+    target = Path(tempfile.gettempdir()) / "threesixty_grade_sample.jpg"
+    argv = [str(ffmpeg.path), "-hide_banner", "-loglevel", "error", "-y"]
+    if media.is_video and middle > 0:
+        argv += ["-ss", f"{middle:g}"]
+    argv += ["-i", str(media.path), "-vf", "scale=1024:-2",
+             "-frames:v", "1", "-q:v", "3", str(target)]
+    result = subprocess.run(argv, capture_output=True, text=True, errors="replace")
+    if result.returncode != 0 or not target.exists():
+        raise FFmpegError(f"could not sample a frame to grade: {result.stderr.strip()}")
+    return target
+
+
 def cmd_extract(args: argparse.Namespace) -> int:
     ffmpeg = resolve_ffmpeg(args.ffmpeg)
     rig = load_rig(args.rig)
 
+    if getattr(args, "auto_grade", False):
+        from . import autograde
+
+        sample_frame = _grade_sample(args.media[0], ffmpeg, _selection_from_args(args))
+        rig.grade, analysis = autograde.auto_grade(ffmpeg, sample_frame)
+        for line in autograde.describe(analysis, rig.grade):
+            print(f"  {line}")
+
+    # Explicit flags win over auto, so a single value can be nudged by hand.
     for setting in ("exposure", "black", "brightness", "contrast", "saturation", "gamma"):
         value = getattr(args, setting, None)
         if value is not None:
@@ -873,6 +908,9 @@ def build_parser() -> argparse.ArgumentParser:
                               "images. none: ignore them")
     grading = extract.add_argument_group(
         "grading", "applied once to the panorama, so every camera agrees about exposure")
+    grading.add_argument("--auto-grade", action="store_true",
+                         help="measure a frame and choose exposure, contrast and "
+                              "saturation from it; explicit flags below still win")
     grading.add_argument("--exposure", type=float, metavar="STOPS",
                          help="exposure correction in stops, -3 to 3")
     grading.add_argument("--black", type=float, help="black level, -1 to 1")

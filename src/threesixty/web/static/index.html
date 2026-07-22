@@ -404,9 +404,10 @@
         </div>
       </div>
       <div class="field" style="margin-bottom:0">
+        <button id="gradeauto" class="primary">Auto</button>
         <button id="gradereset" class="ghost">Reset</button>
-        <button id="gradepreview" class="ghost">Apply to preview</button>
       </div>
+      <p class="hint" id="gradenotes"></p>
       <p class="hint">
         Applied once to the panorama, before it is cut up — so overlapping cameras cannot
         disagree about exposure and leave a seam in the splat.
@@ -780,24 +781,74 @@ function syncGradeLabels() {
   $("gradestate").className = "note" + (gradeIsIdentity(grade) ? "" : " good");
 }
 
-/** Re-fetch the panorama with the grade baked in, so the canvas is honest. */
-let gradeTimer = null;
-function refreshGradedPreview() {
-  clearTimeout(gradeTimer);
-  gradeTimer = setTimeout(() => { if (state.media) loadMedia(); }, 300);
+/** Re-grade the frame already on screen.
+ *
+ * The server keeps the decoded panorama, so this never re-seeks the video: about 50 ms
+ * instead of 600 ms on an 8K source. While a slider is moving it asks for a small proxy
+ * to keep up; on release it asks for the full-size frame.
+ */
+const PROXY_WIDTH = 560;
+let gradeInFlight = false;
+let gradePending = null;
+
+async function regrade(width) {
+  if (!state.media) return;
+  if (gradeInFlight) { gradePending = width; return; }   // coalesce, never queue up
+  gradeInFlight = true;
+  try {
+    const data = await api("/api/preview/grade", { grade: readGrade(), width });
+    await new Promise((resolve) => {
+      const image = new Image();
+      image.onload = () => { state.image = image; draw(); resolve(); };
+      image.onerror = resolve;
+      image.src = data.url;
+    });
+  } catch (err) {
+    setStatus(err.message, "bad");
+  } finally {
+    gradeInFlight = false;
+    if (gradePending !== null) {
+      const next = gradePending;
+      gradePending = null;
+      regrade(next);
+    }
+  }
 }
 
 for (const id of Object.keys(GRADE_FIELDS)) {
-  $(id).addEventListener("input", syncGradeLabels);
-  $(id).addEventListener("change", () => { refresh(); previewCamera(); });
+  // Dragging: small proxy, so the picture keeps up with the slider.
+  $(id).addEventListener("input", () => { syncGradeLabels(); regrade(PROXY_WIDTH); });
+  // Released: the full-size frame, and the camera preview catches up too.
+  $(id).addEventListener("change", () => {
+    refresh();
+    regrade(1600);
+    previewCamera();
+  });
 }
 $("gradereset").addEventListener("click", () => {
   writeGrade(null);
   refresh();
-  refreshGradedPreview();
+  regrade(1600);
   previewCamera();
 });
-$("gradepreview").addEventListener("click", refreshGradedPreview);
+
+$("gradeauto").addEventListener("click", async () => {
+  if (!state.media) { setStatus("load a source first", "warn"); return; }
+  $("gradeauto").disabled = true;
+  try {
+    const data = await api("/api/grade/auto", {});
+    writeGrade(data.grade);
+    $("gradenotes").innerHTML = data.notes.join("<br>");
+    refresh();
+    regrade(1600);
+    previewCamera();
+    setStatus("auto grade applied", "good");
+  } catch (err) {
+    setStatus(err.message, "bad");
+  } finally {
+    $("gradeauto").disabled = false;
+  }
+});
 
 // -------------------------------------------------------------- settings
 

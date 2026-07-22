@@ -6,7 +6,7 @@ person holding the camera or the car it was mounted on never reaches your datase
 
 > **Status: pre-1.0 and under active development.** The whole pipeline has been run end to
 > end on real footage — see [Verified on real footage](#verified-on-real-footage) — and is
-> covered by 525 tests, including tests that drive real COLMAP. Interfaces may still change
+> covered by 559 tests, including tests that drive real COLMAP. Interfaces may still change
 > without notice.
 
 ```bash
@@ -390,8 +390,37 @@ Flat or dark 360 footage can be corrected before it is cut into tiles:
 
 `--exposure` is in stops and acts on the light; `--brightness`, `--contrast`, `--gamma`,
 `--saturation` and `--black` act on the encoded values afterwards, which is the order a
-photographer expects. The Capture tab has sliders for all of them, and the panorama on the
-canvas is re-rendered with the grade applied, so what you see is what gets written.
+photographer expects.
+
+### Auto
+
+```bash
+360extract extract CLIP.mp4 --rig ring --auto-grade
+```
+
+Measures a frame from the middle of the chosen range and picks exposure, contrast and
+saturation from it. Press **Auto** in the Capture tab for the same thing on the frame you are
+looking at; it prints what it measured and why.
+
+The targets are calibrated on real 360 footage rather than on ordinary photographs, and the
+difference is large: **30–40% of an equirectangular frame is sky**. On an overcast village
+drive the 1st–99th percentile span measures 0.90–0.97 purely because sky and shadow occupy
+both ends, and a target tuned for normal photos reads that as "too contrasty" and flattens the
+scene. So contrast is judged on the 10th–90th band, and **only ever raised** — a wide span
+means the scene really is high-dynamic-range, and flattening it cannot recover anything.
+
+It is deliberately conservative: exposure is held back where highlights are already clipping,
+saturation is left alone on near-monochrome footage, and corrections too small to see snap to
+exactly neutral. That last one matters more than it sounds — a grade that is not quite the
+identity changes the rig, which marks an already-extracted dataset stale and invites re-running
+the whole thing for a tenth of a stop nobody can see.
+
+### Live preview
+
+The sliders update the panorama as you drag. The server keeps the decoded frame and re-grades
+*that* rather than seeking the video again — about 50 ms instead of 600 ms on an 8K source —
+and asks for a small proxy while a slider is moving, then the full-size frame when it is
+released.
 
 **It is applied once to the panorama, before the split.** That is not just cheaper: two
 overlapping cameras must agree about exposure, or feature matching sees two different
