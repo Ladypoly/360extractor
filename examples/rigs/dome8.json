@@ -1,0 +1,172 @@
+{
+  "version": 1,
+  "name": "dome-8",
+  "orientation": {
+    "yaw": 0.0,
+    "pitch": 0.0,
+    "roll": 0.0
+  },
+  "output": {
+    "width": 1920,
+    "height": 1440,
+    "format": "jpg",
+    "quality": 2,
+    "interp": "line"
+  },
+  "cameras": [
+    {
+      "name": "h00",
+      "yaw": 0.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "h_fov": 90.0,
+      "v_fov": 67.5,
+      "enabled": true
+    },
+    {
+      "name": "h01",
+      "yaw": 45.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "h_fov": 90.0,
+      "v_fov": 67.5,
+      "enabled": true
+    },
+    {
+      "name": "h02",
+      "yaw": 90.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "h_fov": 90.0,
+      "v_fov": 67.5,
+      "enabled": true
+    },
+    {
+      "name": "h03",
+      "yaw": 135.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "h_fov": 90.0,
+      "v_fov": 67.5,
+      "enabled": true
+    },
+    {
+      "name": "h04",
+      "yaw": 180.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "h_fov": 90.0,
+      "v_fov": 67.5,
+      "enabled": true
+    },
+    {
+      "name": "h05",
+      "yaw": -135.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "h_fov": 90.0,
+      "v_fov": 67.5,
+      "enabled": true
+    },
+    {
+      "name": "h06",
+      "yaw": -90.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "h_fov": 90.0,
+      "v_fov": 67.5,
+      "enabled": true
+    },
+    {
+      "name": "h07",
+      "yaw": -45.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "h_fov": 90.0,
+      "v_fov": 67.5,
+      "enabled": true
+    },
+    {
+      "name": "u00",
+      "yaw": 22.5,
+      "pitch": 30.0,
+      "roll": 0.0,
+      "h_fov": 90.0,
+      "v_fov": 67.5,
+      "enabled": true
+    },
+    {
+      "name": "u01",
+      "yaw": 67.5,
+      "pitch": 30.0,
+      "roll": 0.0,
+      "h_fov": 90.0,
+      "v_fov": 67.5,
+      "enabled": true
+    },
+    {
+      "name": "u02",
+      "yaw": 112.5,
+      "pitch": 30.0,
+      "roll": 0.0,
+      "h_fov": 90.0,
+      "v_fov": 67.5,
+      "enabled": true
+    },
+    {
+      "name": "u03",
+      "yaw": 157.5,
+      "pitch": 30.0,
+      "roll": 0.0,
+      "h_fov": 90.0,
+      "v_fov": 67.5,
+      "enabled": true
+    },
+    {
+      "name": "u04",
+      "yaw": -157.5,
+      "pitch": 30.0,
+      "roll": 0.0,
+      "h_fov": 90.0,
+      "v_fov": 67.5,
+      "enabled": true
+    },
+    {
+      "name": "u05",
+      "yaw": -112.5,
+      "pitch": 30.0,
+      "roll": 0.0,
+      "h_fov": 90.0,
+      "v_fov": 67.5,
+      "enabled": true
+    },
+    {
+      "name": "u06",
+      "yaw": -67.5,
+      "pitch": 30.0,
+      "roll": 0.0,
+      "h_fov": 90.0,
+      "v_fov": 67.5,
+      "enabled": true
+    },
+    {
+      "name": "u07",
+      "yaw": -22.5,
+      "pitch": 30.0,
+      "roll": 0.0,
+      "h_fov": 90.0,
+      "v_fov": 67.5,
+      "enabled": true
+    },
+    {
+      "name": "zenith",
+      "yaw": 0.0,
+      "pitch": 90.0,
+      "roll": 0.0,
+      "h_fov": 90.0,
+      "v_fov": 67.5,
+      "enabled": true
+    }
+  ],
+  "occluders": []
+}

@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "name": "handheld",
+  "orientation": {
+    "yaw": 0.0,
+    "pitch": 0.0,
+    "roll": 0.0
+  },
+  "output": {
+    "width": 1920,
+    "height": 1440,
+    "format": "jpg",
+    "quality": 2,
+    "interp": "line"
+  },
+  "cameras": [
+    {
+      "name": "c00",
+      "yaw": 0.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "h_fov": 90.0,
+      "v_fov": 67.5,
+      "enabled": true
+    },
+    {
+      "name": "c01",
+      "yaw": 60.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "h_fov": 90.0,
+      "v_fov": 67.5,
+      "enabled": true
+    },
+    {
+      "name": "c02",
+      "yaw": 120.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "h_fov": 90.0,
+      "v_fov": 67.5,
+      "enabled": true
+    },
+    {
+      "name": "c03",
+      "yaw": 180.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "h_fov": 90.0,
+      "v_fov": 67.5,
+      "enabled": true
+    },
+    {
+      "name": "c04",
+      "yaw": -120.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "h_fov": 90.0,
+      "v_fov": 67.5,
+      "enabled": true
+    },
+    {
+      "name": "c05",
+      "yaw": -60.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "h_fov": 90.0,
+      "v_fov": 67.5,
+      "enabled": true
+    }
+  ],
+  "occluders": [
+    {
+      "type": "nadir_cone",
+      "angle": 45
+    }
+  ]
+}

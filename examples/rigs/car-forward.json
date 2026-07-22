@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "name": "car-forward",
+  "orientation": {
+    "yaw": 0.0,
+    "pitch": 0.0,
+    "roll": 0.0
+  },
+  "output": {
+    "width": 1920,
+    "height": 1440,
+    "format": "jpg",
+    "quality": 2,
+    "interp": "line"
+  },
+  "cameras": [
+    {
+      "name": "fwd",
+      "yaw": 0.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "h_fov": 90.0,
+      "v_fov": 67.5,
+      "enabled": true
+    },
+    {
+      "name": "fwd_left",
+      "yaw": -45.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "h_fov": 90.0,
+      "v_fov": 67.5,
+      "enabled": true
+    },
+    {
+      "name": "fwd_right",
+      "yaw": 45.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "h_fov": 90.0,
+      "v_fov": 67.5,
+      "enabled": true
+    },
+    {
+      "name": "left",
+      "yaw": -90.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "h_fov": 90.0,
+      "v_fov": 67.5,
+      "enabled": true
+    },
+    {
+      "name": "right",
+      "yaw": 90.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "h_fov": 90.0,
+      "v_fov": 67.5,
+      "enabled": true
+    }
+  ],
+  "occluders": [
+    {
+      "type": "nadir_cone",
+      "angle": 40
+    }
+  ]
+}

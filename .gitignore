@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# extraction output
+dataset/
+*.mp4
+*.mov
+*.insv
+
+# model weights are never vendored -- they carry their own licenses
+*.pt
+*.pth
+*.onnx
