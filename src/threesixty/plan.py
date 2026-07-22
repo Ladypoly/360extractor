@@ -207,6 +207,13 @@ def build_filter_graph(cameras: list[Camera], rig: Rig, prefix: str,
     labels = [f"o{i}" for i in range(count)]
     chains: list[str] = []
 
+    # Grade the panorama once, before the split, so every camera agrees about exposure.
+    # Ahead of the burn as well: grading afterwards would lift the blacked-out occluder
+    # back out of black.
+    grade = rig.grade.filter_chain()
+    if grade:
+        prefix = f"{prefix},{grade}" if prefix else grade
+
     source = "[0:v]"
     if burn:
         # Multiply the panorama by the occluder mask once, before the split: cheaper

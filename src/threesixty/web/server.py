@@ -32,7 +32,7 @@ from ..project import (
     Project,
     ProjectError,
 )
-from ..rig import PRESETS, Camera, Orientation, Output, Rig, RigError
+from ..rig import PRESETS, Camera, Grade, Orientation, Output, Rig, RigError
 
 STATIC = Path(__file__).parent / "static"
 PREVIEW_WIDTH = 1600
@@ -91,6 +91,7 @@ def rig_from_payload(data: dict) -> Rig:
         "cameras": data.get("cameras", []),
         "output": data.get("output", {}),
         "orientation": data.get("orientation", {}),
+        "grade": data.get("grade", {}),
         "occluders": data.get("occluders", []),
     })
 
@@ -553,15 +554,25 @@ class Handler(BaseHTTPRequestHandler):
         return {"media": media_payload(info)}
 
     def api_preview(self, payload: dict) -> dict:
-        """One equirect frame, downscaled, for the rig editor canvas."""
+        """One equirect frame, downscaled, for the rig editor canvas.
+
+        Graded exactly as the extraction will grade it, so the canvas is not a
+        flattering or unflattering lie about what comes out.
+        """
         info = probe_media(payload["path"], self.session.ffmpeg)
         time = float(payload.get("time", 0.0))
         target = self.session.next_name(".jpg")
 
+        grade = ""
+        if payload.get("grade"):
+            grade = Grade(**{k: float(v) for k, v in payload["grade"].items()
+                             if k in Grade.LIMITS}).filter_chain()
+
         argv = [str(self.session.ffmpeg.path), "-hide_banner", "-loglevel", "error", "-y"]
         if info.is_video and time > 0:
             argv += ["-ss", f"{time:g}"]
-        argv += ["-i", str(info.path), "-vf", f"scale={PREVIEW_WIDTH}:-1",
+        argv += ["-i", str(info.path),
+                 "-vf", (f"{grade}," if grade else "") + f"scale={PREVIEW_WIDTH}:-1",
                  "-frames:v", "1", "-q:v", "4", str(target)]
         result = subprocess.run(argv, capture_output=True, text=True, errors="replace")
         if result.returncode != 0 or not target.exists():
@@ -591,11 +602,14 @@ class Handler(BaseHTTPRequestHandler):
         argv = [str(self.session.ffmpeg.path), "-hide_banner", "-loglevel", "error", "-y"]
         if info.is_video and time > 0:
             argv += ["-ss", f"{time:g}"]
+        # Grade first, exactly as the extraction does.
+        grade = rig.grade.filter_chain()
         argv += [
             "-i", str(info.path),
-            "-vf", (f"v360=e:rectilinear:yaw={camera.yaw:g}:pitch={camera.pitch:g}:"
-                    f"roll={camera.roll:g}:h_fov={camera.h_fov:g}:v_fov={camera.v_fov:g}:"
-                    f"w={width}:h={height}:interp={rig.output.interp}"),
+            "-vf", (f"{grade}," if grade else "")
+                   + (f"v360=e:rectilinear:yaw={camera.yaw:g}:pitch={camera.pitch:g}:"
+                      f"roll={camera.roll:g}:h_fov={camera.h_fov:g}:v_fov={camera.v_fov:g}:"
+                      f"w={width}:h={height}:interp={rig.output.interp}"),
             "-frames:v", "1", "-q:v", "4", str(target),
         ]
         result = subprocess.run(argv, capture_output=True, text=True, errors="replace")

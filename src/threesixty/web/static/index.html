@@ -360,6 +360,60 @@
     </section>
 
     <section>
+      <h2>Image <span class="note" id="gradestate">unchanged</span></h2>
+      <div class="field">
+        <label for="gexposure">exposure</label>
+        <div class="slider">
+          <input type="range" id="gexposure" min="-2" max="2" step="0.05" value="0">
+          <output id="gexposurev">0.00</output>
+        </div>
+      </div>
+      <div class="field">
+        <label for="gbrightness">bright</label>
+        <div class="slider">
+          <input type="range" id="gbrightness" min="-0.5" max="0.5" step="0.01" value="0">
+          <output id="gbrightnessv">0.00</output>
+        </div>
+      </div>
+      <div class="field">
+        <label for="gcontrast">contrast</label>
+        <div class="slider">
+          <input type="range" id="gcontrast" min="0.2" max="2.5" step="0.01" value="1">
+          <output id="gcontrastv">1.00</output>
+        </div>
+      </div>
+      <div class="field">
+        <label for="gsaturation">satur.</label>
+        <div class="slider">
+          <input type="range" id="gsaturation" min="0" max="2.5" step="0.01" value="1">
+          <output id="gsaturationv">1.00</output>
+        </div>
+      </div>
+      <div class="field">
+        <label for="ggamma">gamma</label>
+        <div class="slider">
+          <input type="range" id="ggamma" min="0.3" max="3" step="0.01" value="1">
+          <output id="ggammav">1.00</output>
+        </div>
+      </div>
+      <div class="field">
+        <label for="gblack">black</label>
+        <div class="slider">
+          <input type="range" id="gblack" min="-0.3" max="0.3" step="0.01" value="0">
+          <output id="gblackv">0.00</output>
+        </div>
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <button id="gradereset" class="ghost">Reset</button>
+        <button id="gradepreview" class="ghost">Apply to preview</button>
+      </div>
+      <p class="hint">
+        Applied once to the panorama, before it is cut up — so overlapping cameras cannot
+        disagree about exposure and leave a seam in the splat.
+      </p>
+    </section>
+
+    <section>
       <h2>Occluder <span class="note" id="nadirval">no cone</span></h2>
       <input type="range" id="nadir" min="0" max="89" step="1" value="0" style="width:100%">
       <p class="hint" style="margin-top:4px">
@@ -690,9 +744,65 @@ function editCamera(field, value) {
   refresh();
 }
 
+// ---------------------------------------------------------------- grading
+
+const GRADE_FIELDS = {
+  gexposure: ["exposure", 0], gbrightness: ["brightness", 0],
+  gcontrast: ["contrast", 1], gsaturation: ["saturation", 1],
+  ggamma: ["gamma", 1], gblack: ["black", 0],
+};
+
+function readGrade() {
+  const grade = {};
+  for (const [id, [name]] of Object.entries(GRADE_FIELDS)) {
+    grade[name] = parseFloat($(id).value);
+    $(id + "v").textContent = grade[name].toFixed(2);
+  }
+  return grade;
+}
+
+function gradeIsIdentity(grade) {
+  return Object.entries(GRADE_FIELDS).every(
+    ([, [name, neutral]]) => grade[name] === neutral);
+}
+
+function writeGrade(grade) {
+  for (const [id, [name, neutral]] of Object.entries(GRADE_FIELDS)) {
+    $(id).value = (grade && grade[name] !== undefined) ? grade[name] : neutral;
+  }
+  syncGradeLabels();
+}
+
+function syncGradeLabels() {
+  const grade = readGrade();
+  state.rig.grade = grade;
+  $("gradestate").textContent = gradeIsIdentity(grade) ? "unchanged" : "graded";
+  $("gradestate").className = "note" + (gradeIsIdentity(grade) ? "" : " good");
+}
+
+/** Re-fetch the panorama with the grade baked in, so the canvas is honest. */
+let gradeTimer = null;
+function refreshGradedPreview() {
+  clearTimeout(gradeTimer);
+  gradeTimer = setTimeout(() => { if (state.media) loadMedia(); }, 300);
+}
+
+for (const id of Object.keys(GRADE_FIELDS)) {
+  $(id).addEventListener("input", syncGradeLabels);
+  $(id).addEventListener("change", () => { refresh(); previewCamera(); });
+}
+$("gradereset").addEventListener("click", () => {
+  writeGrade(null);
+  refresh();
+  refreshGradedPreview();
+  previewCamera();
+});
+$("gradepreview").addEventListener("click", refreshGradedPreview);
+
 // -------------------------------------------------------------- settings
 
 function readSettings() {
+  state.rig.grade = readGrade();
   state.rig.output.format = $("ofmt").value;
   state.rig.output.quality = parseInt($("oq").value) || 2;
   state.rig.output.auto = true;   // sizes always follow the source
@@ -909,7 +1019,9 @@ async function loadMedia() {
   if (!path) return;
   setStatus("loading…");
   try {
-    const data = await api("/api/preview", { path, time: parseFloat($("time").value) || 0 });
+    const data = await api("/api/preview", {
+      path, time: parseFloat($("time").value) || 0, grade: readGrade(),
+    });
     state.media = data.media;
 
     const m = data.media;
@@ -1023,6 +1135,7 @@ function applyProject(payload) {
   $("oq").value = state.rig.output.quality;
   $("oyaw").value = state.rig.orientation.yaw;
   $("opitch").value = state.rig.orientation.pitch;
+  writeGrade(state.rig.grade);
   $("mode").value = payload.frames.mode;
   $("modeval").value = payload.frames.value;
   $("maskmode").value = payload.output.mask_mode;
@@ -1304,7 +1417,10 @@ $("time").addEventListener("input", () =>
 $("time").addEventListener("change", loadMedia);
 
 $("applypreset").addEventListener("click", () => {
+  // A preset changes the cameras, not how the footage looks: keep the grade.
+  const grade = state.rig ? state.rig.grade : null;
   state.rig = structuredClone(state.presets[$("preset").value]);
+  if (grade) state.rig.grade = grade;
   state.selected = 0;
   refresh(); previewCamera();
 });

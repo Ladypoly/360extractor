@@ -140,6 +140,64 @@ class Output:
 
 
 @dataclass
+class Grade:
+    """Tonal correction applied to the panorama before it is cut into tiles.
+
+    Applied **once, to the source frame**, rather than per tile. That is both cheaper
+    and the only correct place for it: overlapping cameras must agree about exposure,
+    or feature matching sees two different pictures of the same wall and a splat trainer
+    bakes the seam in.
+
+    `exposure` is in stops and acts on the light; `brightness` and `contrast` act on the
+    encoded values afterwards, which is the order a photographer expects. All defaults
+    are the identity, and an identity grade emits no filter at all -- pixels are never
+    touched to no purpose.
+    """
+
+    exposure: float = 0.0     # stops, ffmpeg allows -3..3
+    black: float = 0.0        # black level lift/cut, -1..1
+    brightness: float = 0.0   # -1..1
+    contrast: float = 1.0     # 1.0 is unchanged
+    saturation: float = 1.0   # 1.0 is unchanged
+    gamma: float = 1.0        # 1.0 is unchanged
+
+    #: What ffmpeg accepts, so a bad value is rejected with a useful message rather
+    #: than deep inside a filter graph.
+    LIMITS = {
+        "exposure": (-3.0, 3.0), "black": (-1.0, 1.0), "brightness": (-1.0, 1.0),
+        "contrast": (-1000.0, 1000.0), "saturation": (0.0, 3.0), "gamma": (0.1, 10.0),
+    }
+
+    @property
+    def is_identity(self) -> bool:
+        return (self.exposure == 0.0 and self.black == 0.0 and self.brightness == 0.0
+                and self.contrast == 1.0 and self.saturation == 1.0 and self.gamma == 1.0)
+
+    def validate(self) -> None:
+        for name, (low, high) in self.LIMITS.items():
+            value = getattr(self, name)
+            if not math.isfinite(value) or not low <= value <= high:
+                raise RigError(
+                    f"grade.{name} must be in [{low:g}, {high:g}], got {value}")
+
+    def filter_chain(self) -> str:
+        """The ffmpeg filters for this grade, or an empty string for the identity."""
+        if self.is_identity:
+            return ""
+        self.validate()
+
+        parts = []
+        if self.exposure != 0.0 or self.black != 0.0:
+            parts.append(f"exposure=exposure={self.exposure:g}:black={self.black:g}")
+        if (self.brightness, self.contrast, self.saturation, self.gamma) != \
+                (0.0, 1.0, 1.0, 1.0):
+            parts.append(
+                f"eq=contrast={self.contrast:g}:brightness={self.brightness:g}"
+                f":saturation={self.saturation:g}:gamma={self.gamma:g}")
+        return ",".join(parts)
+
+
+@dataclass
 class Orientation:
     """Rig-level rotation, applied on top of every camera.
 
@@ -165,6 +223,8 @@ class Rig:
     cameras: list[Camera] = field(default_factory=list)
     output: Output = field(default_factory=Output)
     orientation: Orientation = field(default_factory=Orientation)
+    #: Tonal correction for the source panorama. Identity by default.
+    grade: Grade = field(default_factory=Grade)
     #: Occluder definitions, consumed by the masking milestone. Carried through
     #: untouched for now so rigs written today stay valid.
     occluders: list[dict[str, Any]] = field(default_factory=list)
@@ -176,6 +236,7 @@ class Rig:
             raise RigError("rig has no cameras")
         self.output.validate()
         self.orientation.validate()
+        self.grade.validate()
 
         seen: set[str] = set()
         for index, camera in enumerate(self.cameras):
@@ -248,6 +309,7 @@ class Rig:
             "name": self.name,
             "orientation": asdict(self.orientation),
             "output": asdict(self.output),
+            "grade": asdict(self.grade),
             "cameras": [asdict(c) for c in self.cameras],
             "occluders": self.occluders,
         }
@@ -286,6 +348,11 @@ class Rig:
             cameras = [Camera(**c) for c in data.get("cameras", [])]
             output = Output(**data.get("output", {}))
             orientation = Orientation(**data.get("orientation", {}))
+            # `LIMITS` is a class attribute, not a field, but asdict() on older saved
+            # rigs could not have included it -- filter defensively either way.
+            grade_data = {k: v for k, v in (data.get("grade") or {}).items()
+                          if k in Grade.LIMITS}
+            grade = Grade(**grade_data)
         except TypeError as exc:
             raise RigError(f"unrecognized field in rig: {exc}") from exc
 
@@ -294,6 +361,7 @@ class Rig:
             cameras=cameras,
             output=output,
             orientation=orientation,
+            grade=grade,
             occluders=data.get("occluders", []),
         )
         rig.validate()

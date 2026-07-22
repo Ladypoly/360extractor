@@ -572,6 +572,14 @@ def cmd_extract(args: argparse.Namespace) -> int:
     ffmpeg = resolve_ffmpeg(args.ffmpeg)
     rig = load_rig(args.rig)
 
+    for setting in ("exposure", "black", "brightness", "contrast", "saturation", "gamma"):
+        value = getattr(args, setting, None)
+        if value is not None:
+            setattr(rig.grade, setting, value)
+    rig.grade.validate()
+    if not rig.grade.is_identity:
+        print(f"grading: {rig.grade.filter_chain()}")
+
     if args.nadir:
         # Replaces any nadir cone the rig already carried, rather than stacking.
         rig.occluders = [o for o in rig.occluders if o.get("type") != "nadir_cone"]
@@ -863,6 +871,16 @@ def build_parser() -> argparse.ArgumentParser:
                               "beside every image, losing no pixels (default). skip: drop "
                               "cameras that are mostly occluder. burn: black it into the "
                               "images. none: ignore them")
+    grading = extract.add_argument_group(
+        "grading", "applied once to the panorama, so every camera agrees about exposure")
+    grading.add_argument("--exposure", type=float, metavar="STOPS",
+                         help="exposure correction in stops, -3 to 3")
+    grading.add_argument("--black", type=float, help="black level, -1 to 1")
+    grading.add_argument("--brightness", type=float, help="-1 to 1")
+    grading.add_argument("--contrast", type=float, help="1.0 leaves it alone")
+    grading.add_argument("--saturation", type=float, help="1.0 leaves it alone")
+    grading.add_argument("--gamma", type=float, help="1.0 leaves it alone")
+
     extract.add_argument("--nadir", type=float, metavar="DEG",
                          help="add a nadir cone occluder of this many degrees, covering the "
                               "tripod, stick or car roof directly below the rig")
