@@ -37,4 +37,8 @@ packages = ["src/threesixty"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["ffmpeg: requires a working ffmpeg with the v360 filter"]
+markers = [
+  "ffmpeg: requires a working ffmpeg with the v360 filter",
+  "slow: runs a real detection model, and may download weights",
+]
+

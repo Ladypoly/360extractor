@@ -154,12 +154,51 @@ alpha 0 as "do not train here". Getting this backwards silently trains on *only*
 
 ### Dynamic occluders — people, passing cars, faces and plates
 
-These move, so no painted region can catch them. They need detection per frame, and that runs
-*after* extraction, on the rectilinear tiles: detectors are trained on ordinary photographs and
+These move, so no painted region can catch them. Detection runs *after* extraction, on the
+rectilinear tiles rather than the panorama: detectors are trained on ordinary photographs and
 equirectangular distortion wrecks their recall away from the equator.
 
-Not built yet — it is the next milestone (YOLO to find them, SAM 2.1 to refine and track them,
-results fused back through the sphere so overlapping cameras agree).
+```bash
+pip install -e ".[ml]"
+360extract mask dataset/ --rig rigs/car.json --backend sam2.1
+```
+
+| backend | what it does |
+|---|---|
+| `yolo` | finds objects by class on its own. Fast, weights self-download |
+| `sam2.1` | YOLO supplies the prompts, SAM 2.1 sharpens the outlines. **Default** |
+
+**SAM 2.1 has no concept of a "person".** It segments what it is pointed at — it is promptable,
+not open-vocabulary. So the `sam2.1` backend is YOLO finding *what* to mask and SAM refining
+*exactly where*, which is what it is genuinely better at.
+
+Masks are grown by a few pixels (`--dilate`, default 6): segmentation edges sit slightly inside
+the object, and a sliver of leftover pedestrian is enough to seed a floater.
+
+#### Why detections are reconciled through the sphere
+
+A pedestrian caught by camera A and *missed* by overlapping camera B gives inconsistent
+supervision, and a splat trainer happily bakes the ghost in from B. So every camera's tile mask
+is projected back onto the sphere, unioned there, and re-projected. Tile-space accuracy,
+sphere-wide consistency. `--no-fuse` turns it off.
+
+That reverse projection is done in numpy rather than by ffmpeg, and the reason is worth
+recording: `v360` can map `flat` back to `e`, but it clamps the tile's border pixels outward
+across the whole sphere, so one black pixel at a tile edge would mark half the panorama as
+ignored. Its `alpha_mask` option looks like the fix and is not — measured against analytically
+computed frustum coverage it disagrees completely (60°×60° camera: true coverage 0.052, alpha
+0.725; at yaw 90 it reports nothing at all). So the inverse is written out explicitly and
+`tests/test_fuse.py::TestRoundTrip` pins it against `v360`'s forward projection across five
+camera configurations, including the seam and steep pitch.
+
+#### GPU
+
+`pip install torch` gives a CPU build on Windows. For a CUDA build:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cu124
+360extract mask dataset/ --rig rigs/car.json --device cuda:0
+```
 
 ## Frame selection
 
@@ -230,7 +269,7 @@ finished.
 |---|---|
 | M1 — rig format, ffmpeg discovery, extraction | **done** |
 | M2 — nadir cones and painted equirect masks | **done** — no ML dependency |
-| M3 — ML masking (YOLO, SAM 2.1, SAM 3) | not started |
+| M3 — ML masking (YOLO, SAM 2.1) + sphere fusion | **done** — optional `[ml]` extra |
 | M4 — Brush/COLMAP rig export | not started |
 | M5 — rig editor UI | **done** |
 | M6 — inpainting | not started |
@@ -240,7 +279,13 @@ finished.
 ```bash
 pytest                    # everything
 pytest -m "not ffmpeg"    # unit tests only, no ffmpeg needed
+pytest -m "not slow"      # skip the tests that run real detection models
 ```
+
+Detection is tested at two levels: the pipeline against a stub detector, so it is
+deterministic and needs no weights; and the real backends against ultralytics' own sample
+photographs, which genuinely contain people and a bus. The latter skip rather than silently
+pass when weights are unavailable.
 
 ## License
 

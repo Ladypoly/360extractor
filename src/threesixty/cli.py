@@ -36,6 +36,11 @@ def _err(message: str) -> None:
     print(f"error: {message}", file=sys.stderr)
 
 
+def ml_defaults() -> tuple[str, ...]:
+    """Default occluder classes, without importing torch just to build the parser."""
+    return ("person", "car", "bus", "truck", "motorcycle", "bicycle")
+
+
 # -- doctor -----------------------------------------------------------------
 
 
@@ -211,6 +216,35 @@ def _selection_from_args(args: argparse.Namespace) -> FrameSelection:
     return FrameSelection("fps", args.fps, args.start, args.end)
 
 
+def cmd_mask(args: argparse.Namespace) -> int:
+    """Detect and mask dynamic occluders in an already-extracted dataset."""
+    from .mask import dynamic, ml
+
+    if not ml.available():
+        _err('dynamic masking needs the ML extra: pip install -e ".[ml]"')
+        return 1
+
+    ffmpeg = resolve_ffmpeg(args.ffmpeg)
+    rig = load_rig(args.rig)
+    classes = [c.strip() for c in args.classes.split(",") if c.strip()]
+
+    backend = ml.make_backend(
+        args.backend, classes=classes, confidence=args.confidence,
+        dilate=args.dilate, device=args.device,
+        yolo_model=args.yolo_model, sam_model=args.sam_model,
+    )
+    print(f"backend: {backend.name}, looking for {', '.join(classes)}")
+
+    report = dynamic.run(
+        ffmpeg, Path(args.dataset), rig, backend,
+        fuse=not args.no_fuse, static=not args.no_static,
+        on_progress=lambda note: print(f"  {note}", flush=True),
+    )
+    print(f"\n{report.summary()}")
+    print(f"{report.masks_written} masks written to {Path(args.dataset) / 'masks'}")
+    return 0
+
+
 def cmd_ui(args: argparse.Namespace) -> int:
     """Serve the local rig editor."""
     from .web.server import serve
@@ -372,6 +406,28 @@ def build_parser() -> argparse.ArgumentParser:
     rig_show = rig_sub.add_parser("show", help="print a rig as a table")
     rig_show.add_argument("rig", help="rig file or preset name")
     rig_show.set_defaults(func=cmd_rig_show)
+
+    mask = sub.add_parser(
+        "mask", help="mask moving occluders (people, cars) in an extracted dataset")
+    mask.add_argument("dataset", help="the folder `extract` wrote, containing images/")
+    mask.add_argument("--rig", required=True, help="the rig used for the extraction")
+    mask.add_argument("--backend", choices=["yolo", "sam2.1"], default="sam2.1",
+                      help="yolo finds objects by class; sam2.1 uses YOLO for prompts "
+                           "and refines the outlines (default)")
+    mask.add_argument("--classes", default=",".join(ml_defaults()),
+                      help="comma-separated COCO class names to mask")
+    mask.add_argument("--confidence", type=float, default=0.25)
+    mask.add_argument("--dilate", type=int, default=6,
+                      help="grow masks by this many pixels; a sliver of leftover "
+                           "pedestrian is enough to seed a floater (default 6)")
+    mask.add_argument("--device", help="torch device, e.g. cuda:0 or cpu")
+    mask.add_argument("--yolo-model", default="yolo11n-seg.pt")
+    mask.add_argument("--sam-model", default="sam2.1_t.pt")
+    mask.add_argument("--no-fuse", action="store_true",
+                      help="skip reconciling overlapping cameras through the sphere")
+    mask.add_argument("--no-static", action="store_true",
+                      help="do not merge in the rig's painted or cone occluders")
+    mask.set_defaults(func=cmd_mask)
 
     ui = sub.add_parser("ui", help="open the rig editor in a browser")
     ui.add_argument("--host", default="127.0.0.1", help="bind address (default localhost only)")
