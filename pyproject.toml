@@ -30,7 +30,9 @@ dev = ["pytest>=8.0", "pytest-cov>=5.0"]
 threesixty = "threesixty.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/elin/360extract"
+Homepage = "https://github.com/Ladypoly/360extractor"
+Source = "https://github.com/Ladypoly/360extractor"
+Issues = "https://github.com/Ladypoly/360extractor/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/threesixty"]

@@ -4,6 +4,10 @@ Turn 360° equirectangular footage into perspective image sets for photogrammetr
 3D Gaussian Splatting — with precise control over **which directions get extracted**, so the
 person holding the camera or the car it was mounted on never reaches your dataset.
 
+> **Status: pre-1.0 and under active development.** Extraction, masking and the rig editor
+> work and are covered by 365 tests. Export to COLMAP and Brush is not built yet — see the
+> milestone table at the bottom. Interfaces may still change without notice.
+
 ```bash
 360extract rig new ring --count 8 -o rigs/ring8.json
 360extract extract CLIP.mp4 --rig rigs/ring8.json --fps 2 -o dataset/
