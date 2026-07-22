@@ -177,6 +177,20 @@
 
    <div class="panel" id="panel-capture">
     <section>
+      <h2>Project <span class="note" id="projname">none open</span></h2>
+      <div class="field">
+        <button id="openproject" class="ghost">Open…</button>
+        <button id="newproject" class="ghost">New…</button>
+        <button id="saveproject" class="ghost">Save</button>
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <input id="snaplabel" placeholder="snapshot name">
+        <button id="snapproject" class="ghost" style="flex:0 0 auto">Snapshot</button>
+      </div>
+      <p class="hint" id="projstages"></p>
+    </section>
+
+    <section>
       <h2>Rig <span class="note" id="camcount"></span></h2>
       <div class="field">
         <select id="preset"></select>
@@ -344,6 +358,7 @@ const state = {
   nadir: 0,
   dragging: null,
   outdirTouched: false,
+  project: null,
   // Painted occluder, kept as its own full-resolution layer so the panorama
   // underneath is never modified.
   paint: { mode: null, layer: null, brush: 40, drawing: false, last: null, dirty: false },
@@ -868,7 +883,119 @@ async function poll() {
   $("extract").disabled = false; $("cancel").disabled = true;
 }
 
+// -------------------------------------------------------------- projects
+
+function showProject(payload) {
+  state.project = payload;
+  if (!payload) {
+    $("projname").textContent = "none open";
+    $("projstages").textContent = "";
+    return;
+  }
+  $("projname").textContent = payload.name;
+  $("outdir").value = payload.root;
+  state.outdirTouched = true;
+
+  const stages = payload.stages || {};
+  $("projstages").innerHTML = Object.entries(stages)
+    .map(([name, status]) => {
+      const colour = status === "done" ? "good" : status === "stale" ? "warn" : "";
+      return `<span class="${colour}">${name}: ${status}</span>`;
+    }).join(" · ") + (payload.missing && payload.missing.length
+      ? `<br><span class="bad">${payload.missing.length} source(s) missing</span>` : "");
+}
+
+/** Pull a loaded project's settings into every control. */
+function applyProject(payload) {
+  state.rig = payload.rig;
+  state.selected = 0;
+
+  $("ofmt").value = state.rig.output.format;
+  $("oq").value = state.rig.output.quality;
+  $("oyaw").value = state.rig.orientation.yaw;
+  $("opitch").value = state.rig.orientation.pitch;
+  $("mode").value = payload.frames.mode;
+  $("modeval").value = payload.frames.value;
+  $("maskmode").value = payload.output.mask_mode;
+  $("maskhelp").textContent = MASK_HELP[$("maskmode").value] || "";
+
+  const cone = (state.rig.occluders || []).find((o) => o.type === "nadir_cone");
+  state.nadir = cone ? cone.angle : 0;
+  $("nadir").value = state.nadir;
+  $("nadirval").textContent = state.nadir ? "below −" + state.nadir + "°" : "no cone";
+
+  showProject(payload);
+  refresh();
+  refreshCoverage();
+
+  if (payload.sources && payload.sources.length) {
+    $("path").value = payload.sources[0];
+    loadMedia();
+  }
+}
+
+/** Everything the UI holds, in the shape the project expects. */
+function projectPayload() {
+  readSettings();
+  return {
+    rig: state.rig,
+    sources: state.media ? [state.media.path] : [],
+    frames: {
+      mode: $("mode").value,
+      value: parseFloat($("modeval").value) || 2,
+    },
+    output: { mask_mode: $("maskmode").value },
+  };
+}
+
+async function saveProject(snapshotLabel) {
+  const body = projectPayload();
+  if (snapshotLabel) body.snapshot = snapshotLabel;
+  if (!state.project) {
+    const root = $("outdir").value.trim();
+    if (!root) { setStatus("choose an output folder first", "warn"); return; }
+    body.root = root;
+  }
+  try {
+    const data = await api("/api/project/save", body);
+    showProject(data.project);
+    setStatus(snapshotLabel ? `snapshot "${snapshotLabel}" saved` : "project saved", "good");
+  } catch (err) {
+    setStatus(err.message, "bad");
+  }
+}
+
 // ----------------------------------------------------------------- wire
+
+$("openproject").addEventListener("click", async () => {
+  try {
+    const paths = await pick("directory", "Open a project folder", "media", "");
+    if (!paths.length) return;
+    const data = await api("/api/project/open", { path: paths[0] });
+    applyProject(data.project);
+    setStatus("opened " + data.project.name, "good");
+  } catch (err) { setStatus(err.message, "bad"); }
+});
+$("newproject").addEventListener("click", async () => {
+  try {
+    const paths = await pick("directory", "Choose a folder for the new project", "media", "");
+    if (!paths.length) return;
+    const data = await api("/api/project/new", {
+      root: paths[0],
+      sources: state.media ? [state.media.path] : [],
+      force: false,
+    });
+    showProject(data.project);
+    await saveProject(null);
+    setStatus("created " + data.project.name, "good");
+  } catch (err) { setStatus(err.message, "bad"); }
+});
+$("saveproject").addEventListener("click", () => saveProject(null));
+$("snapproject").addEventListener("click", () => {
+  const label = $("snaplabel").value.trim();
+  if (!label) { setStatus("name the snapshot first", "warn"); return; }
+  saveProject(label);
+});
 
 $("browse").addEventListener("click", browseSource);
 $("browseout").addEventListener("click", async () => {
@@ -1017,6 +1144,14 @@ window.addEventListener("resize", fitCanvas);
   $("maskhelp").textContent = MASK_HELP[$("maskmode").value];
   refresh(false);
   fitCanvas();
+
+  // A project may already be open, when the UI was started with --project.
+  try {
+    const existing = await api("/api/project");
+    if (existing.project) applyProject(existing.project);
+  } catch (err) {
+    // Nothing open is the normal case; leave the defaults alone.
+  }
 })();
 </script>
 </body>

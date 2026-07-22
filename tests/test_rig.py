@@ -178,6 +178,12 @@ class TestSerialization:
         with pytest.raises(RigError, match="not valid JSON"):
             Rig.load(path)
 
+    def test_loads_a_rig_saved_with_a_byte_order_mark(self, tmp_path):
+        """Windows editors write UTF-8 with a BOM; a hand-edited rig must still load."""
+        path = tmp_path / "bom.json"
+        path.write_text(ring(4).to_json(), encoding="utf-8-sig")
+        assert len(Rig.load(path).cameras) == 4
+
     def test_load_missing_file(self, tmp_path):
         with pytest.raises(RigError, match="no such rig file"):
             Rig.load(tmp_path / "absent.json")

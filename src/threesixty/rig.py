@@ -292,7 +292,9 @@ class Rig:
         if not source.exists():
             raise RigError(f"no such rig file: {source}")
         try:
-            data = json.loads(source.read_text(encoding="utf-8"))
+            # utf-8-sig so a rig hand-edited in Notepad or written by PowerShell's
+            # Set-Content still opens; both prepend a byte order mark.
+            data = json.loads(source.read_text(encoding="utf-8-sig"))
         except json.JSONDecodeError as exc:
             raise RigError(f"{source} is not valid JSON: {exc}") from exc
         if not isinstance(data, dict):

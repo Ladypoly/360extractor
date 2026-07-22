@@ -72,6 +72,44 @@ worse than no UI, because it hides exactly the occluder you were trying to exclu
 
 Node is only needed to run those tests, never to use the tool.
 
+## Projects
+
+A project is one `project.json` at the root of the dataset it describes, beside `images/` and
+`masks/`. That makes the folder self-describing: move it, hand it to someone else, come back in
+a month, and the settings arrive with the pixels.
+
+```bash
+360extract project new dataset/ --source CLIP.mp4 --rig car-forward
+360extract run dataset/                 # extract, then mask; skips what is current
+360extract project show dataset/
+```
+
+It records **what has already been done**, and each stage stores a fingerprint of the settings
+that produced it — so the tool distinguishes "already extracted" from "extracted, but you have
+since changed the rig":
+
+```
+  stages:
+    extract  stale  at 2026-07-22T14:02:20+00:00  images=100, cameras=5
+             settings changed since this ran; re-run to update
+    mask     pending
+```
+
+The fingerprints are per stage, so changing the detector does not force a re-extract, while
+changing the rig does. Redoing a stage clears the later ones, which would otherwise claim to be
+current while describing images that no longer exist.
+
+Snapshots are cheap insurance before a big change — settings only, no images:
+
+```bash
+360extract project snapshot dataset/ --label before-retilt
+360extract project snapshot dataset/ --restore before-retilt
+```
+
+The painted occluder lives in `assets/` inside the project, so it survives a reboot.
+
+`360extract ui --project dataset/` opens straight into one.
+
 ## Rigs
 
 A rig is a JSON file listing the cameras to extract. It is a plain, diffable artifact you can

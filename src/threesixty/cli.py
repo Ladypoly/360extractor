@@ -29,6 +29,7 @@ from .ffmpeg import (
 )
 from .mask import apply as mask_apply
 from .plan import DEFAULT_MAX_STREAMS, FrameSelection, plan_extraction
+from .project import STAGES, Project, ProjectError
 from .rig import PRESETS, Output, Rig, RigError, cube, dome, handheld, ring, car_forward
 
 
@@ -216,6 +217,146 @@ def _selection_from_args(args: argparse.Namespace) -> FrameSelection:
     return FrameSelection("fps", args.fps, args.start, args.end)
 
 
+def cmd_project_new(args: argparse.Namespace) -> int:
+    rig = load_rig(args.rig) if args.rig else None
+    project = Project.create(args.directory, sources=args.source, rig=rig,
+                             name=args.name, overwrite=args.force)
+    print(f"created {project.file}")
+    print(f"  rig     {project.rig.name} ({len(project.rig.enabled_cameras)} cameras)")
+    print(f"  sources {len(project.sources) or 'none yet'}")
+    return 0
+
+
+def cmd_project_show(args: argparse.Namespace) -> int:
+    project = Project.load(args.directory)
+    print(f"{project.name}  ({project.file})")
+    print(f"  created  {project.created or 'unknown'}")
+    print(f"  modified {project.modified or 'unknown'}")
+
+    print(f"\n  sources ({len(project.sources)}):")
+    missing = {str(p) for p in project.missing_sources()}
+    for source in project.resolved_sources():
+        flag = "  MISSING" if str(source) in missing else ""
+        print(f"    {source}{flag}")
+
+    print(f"\n  rig      {project.rig.name}, "
+          f"{len(project.rig.enabled_cameras)}/{len(project.rig.cameras)} cameras")
+    print(f"  frames   {project.frames.mode} {project.frames.value:g}")
+    print(f"  output   layout={project.output.layout} mask={project.output.mask_mode}")
+    print(f"  detect   {project.detect.backend}, {', '.join(project.detect.classes)}")
+
+    print("\n  stages:")
+    for stage in STAGES:
+        status = project.status(stage)
+        record = project.stages.get(stage)
+        detail = ""
+        if record and record.details:
+            detail = "  " + ", ".join(f"{k}={v}" for k, v in record.details.items())
+        when = f"  at {record.done_at}" if record and record.done_at else ""
+        print(f"    {stage:<8} {status}{when}{detail}")
+        if status == "stale":
+            print(f"             settings changed since this ran; re-run to update")
+
+    snapshots = project.snapshots()
+    if snapshots:
+        print(f"\n  snapshots: {', '.join(snapshots)}")
+    return 0
+
+
+def cmd_project_snapshot(args: argparse.Namespace) -> int:
+    project = Project.load(args.directory)
+    if args.restore:
+        restored = project.restore(args.restore)
+        restored.save()
+        print(f"restored {args.restore}")
+        return 0
+    path = project.snapshot(args.label)
+    print(f"saved {path}")
+    return 0
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    """Run the whole pipeline for a project, skipping what is already current."""
+    project = Project.load(args.directory)
+    ffmpeg = resolve_ffmpeg(args.ffmpeg)
+
+    missing = project.missing_sources()
+    if missing:
+        _err("these sources are missing:\n  " + "\n  ".join(str(p) for p in missing))
+        return 1
+    if not project.sources:
+        _err("this project has no sources. Add one with `project new --source ...`")
+        return 1
+
+    if project.status("extract") == "done" and not args.force:
+        print(f"extract: already current ({project.stages['extract'].details})")
+    else:
+        if project.is_stale("extract"):
+            print("extract: settings changed since the last run, redoing")
+        totals = _extract_project(project, ffmpeg, args)
+        project.mark_done("extract", images=totals.images_written,
+                          cameras=totals.cameras_done)
+        project.save()
+
+    if args.no_mask:
+        return 0
+
+    if project.status("mask") == "done" and not args.force:
+        print(f"mask: already current ({project.stages['mask'].details})")
+        return 0
+
+    from .mask import dynamic, ml
+    if not ml.available():
+        print('mask: skipped, the ML extra is not installed (pip install -e ".[ml]")')
+        return 0
+
+    backend = ml.make_backend(
+        project.detect.backend, classes=project.detect.classes,
+        confidence=project.detect.confidence, dilate=project.detect.dilate,
+        device=project.detect.device)
+    print(f"mask: {backend.name}, looking for {', '.join(project.detect.classes)}")
+    report = dynamic.run(ffmpeg, project.root, project.rig, backend,
+                         fuse=project.detect.fuse,
+                         on_progress=lambda note: print(f"  {note}", flush=True))
+    print(f"  {report.summary()}")
+    project.mark_done("mask", masks=report.masks_written,
+                      detections=report.detections)
+    project.save()
+    return 0
+
+
+def _extract_project(project: Project, ffmpeg, args) -> ExtractResult:
+    """Extraction driven entirely by a project's stored settings."""
+    selection = FrameSelection(
+        mode=project.frames.mode, value=project.frames.value,
+        start=project.frames.start, end=project.frames.end)
+
+    totals = ExtractResult()
+    for source in project.resolved_sources():
+        media = probe_media(source, ffmpeg)
+        if selection.mode == "sharp" and media.is_video:
+            print(f"{media.path.name}: analysing sharpness…", flush=True)
+
+        plan = plan_extraction(
+            media=media, rig=project.rig, selection=selection,
+            output_root=project.root, layout=project.output.layout,
+            resume=False, ffmpeg=ffmpeg,
+            on_analysis=lambda note: print(f"  {note}"),
+            mask_mode=project.output.mask_mode,
+        )
+        for line in mask_apply.summarize(plan.mask_plan) if plan.mask_plan else []:
+            print(f"  {line}")
+        print(f"{media.path.name}: {plan.total_cameras} cameras, "
+              f"~{plan.estimated_images} images")
+
+        result = run_extraction(plan, ffmpeg, on_progress=terminal_progress())
+        finish_progress()
+        totals.images_written += result.images_written
+        totals.masks_written += result.masks_written
+        totals.cameras_done += result.cameras_done
+    return totals
+
+
 def cmd_mask(args: argparse.Namespace) -> int:
     """Detect and mask dynamic occluders in an already-extracted dataset."""
     from .mask import dynamic, ml
@@ -250,7 +391,7 @@ def cmd_ui(args: argparse.Namespace) -> int:
     from .web.server import serve
 
     serve(host=args.host, port=args.port, open_browser=not args.no_browser,
-          ffmpeg_path=args.ffmpeg)
+          ffmpeg_path=args.ffmpeg, project_path=args.project)
     return 0
 
 
@@ -407,6 +548,40 @@ def build_parser() -> argparse.ArgumentParser:
     rig_show.add_argument("rig", help="rig file or preset name")
     rig_show.set_defaults(func=cmd_rig_show)
 
+    project_parser = sub.add_parser(
+        "project", help="create and inspect projects (settings plus what has been done)")
+    project_sub = project_parser.add_subparsers(dest="project_command", required=True)
+
+    project_new = project_sub.add_parser("new", help="start a project in a folder")
+    project_new.add_argument("directory", help="the dataset folder; project.json goes here")
+    project_new.add_argument("--source", action="append", default=[],
+                             help="a 360 video or still; repeat for several")
+    project_new.add_argument("--rig", help="rig file or preset name (default ring)")
+    project_new.add_argument("--name")
+    project_new.add_argument("--force", action="store_true",
+                             help="replace an existing project.json")
+    project_new.set_defaults(func=cmd_project_new)
+
+    project_show = project_sub.add_parser("show", help="print settings and stage status")
+    project_show.add_argument("directory", nargs="?", default=".")
+    project_show.set_defaults(func=cmd_project_show)
+
+    project_snap = project_sub.add_parser(
+        "snapshot", help="save or restore a named copy of the settings")
+    project_snap.add_argument("directory", nargs="?", default=".")
+    project_snap.add_argument("--label", default="",
+                              help="name for the snapshot being saved")
+    project_snap.add_argument("--restore", metavar="LABEL",
+                              help="restore this snapshot instead of saving one")
+    project_snap.set_defaults(func=cmd_project_snapshot)
+
+    run = sub.add_parser(
+        "run", help="extract and mask a project, skipping what is already current")
+    run.add_argument("directory", nargs="?", default=".")
+    run.add_argument("--force", action="store_true", help="redo stages already done")
+    run.add_argument("--no-mask", action="store_true", help="stop after extraction")
+    run.set_defaults(func=cmd_run)
+
     mask = sub.add_parser(
         "mask", help="mask moving occluders (people, cars) in an extracted dataset")
     mask.add_argument("dataset", help="the folder `extract` wrote, containing images/")
@@ -433,6 +608,7 @@ def build_parser() -> argparse.ArgumentParser:
     ui.add_argument("--host", default="127.0.0.1", help="bind address (default localhost only)")
     ui.add_argument("--port", type=int, default=8360)
     ui.add_argument("--no-browser", action="store_true", help="do not open a browser window")
+    ui.add_argument("--project", help="open this project on startup")
     ui.set_defaults(func=cmd_ui)
 
     extract = sub.add_parser("extract", help="extract perspective images from 360 sources")
@@ -481,7 +657,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.func(args)
-    except (FFmpegError, RigError, ValueError) as exc:
+    except (FFmpegError, RigError, ProjectError, ValueError) as exc:
         _err(str(exc))
         return 1
     except KeyboardInterrupt:

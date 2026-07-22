@@ -14,7 +14,7 @@ import tempfile
 import threading
 import traceback
 import webbrowser
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -24,6 +24,14 @@ from ..mask import geometric
 from ..extract import run_extraction
 from ..ffmpeg import FFmpegError, MediaInfo, probe_media, resolve_ffmpeg
 from ..plan import FrameSelection, camera_size, plan_extraction
+from ..project import (
+    STAGES,
+    DetectSettings,
+    FrameSettings,
+    OutputSettings,
+    Project,
+    ProjectError,
+)
 from ..rig import PRESETS, Camera, Orientation, Output, Rig, RigError
 
 STATIC = Path(__file__).parent / "static"
@@ -60,12 +68,14 @@ class Job:
 class Session:
     """Shared server state: the resolved ffmpeg, preview cache, current job."""
 
-    def __init__(self, ffmpeg) -> None:
+    def __init__(self, ffmpeg, project=None) -> None:
         self.ffmpeg = ffmpeg
         self.cache = Path(tempfile.mkdtemp(prefix="360extract-ui-"))
         self.job = Job()
         self.counter = 0
         self.lock = threading.Lock()
+        #: The open project, if any. Owns the painted occluder and remembers settings.
+        self.project = project
 
     def next_name(self, suffix: str) -> Path:
         with self.lock:
@@ -144,6 +154,10 @@ class Handler(BaseHTTPRequestHandler):
                                         for name, factory in PRESETS.items()}})
             elif route.path == "/api/progress":
                 self._json(self.session.job.snapshot())
+            elif route.path == "/api/project":
+                project = self.session.project
+                self._json({"project": self._project_payload(project)
+                            if project else None})
             elif route.path.startswith("/preview/"):
                 name = Path(route.path).name
                 self._file(self.session.cache / name, "image/jpeg")
@@ -171,6 +185,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.api_rig_load(payload))
             elif route.path == "/api/extract":
                 self._json(self.api_extract(payload))
+            elif route.path == "/api/project/open":
+                self._json(self.api_project_open(payload))
+            elif route.path == "/api/project/save":
+                self._json(self.api_project_save(payload))
+            elif route.path == "/api/project/new":
+                self._json(self.api_project_new(payload))
             elif route.path == "/api/mask/paint":
                 self._json(self.api_mask_paint(payload))
             elif route.path == "/api/mask/coverage":
@@ -182,13 +202,73 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True})
             else:
                 self._json({"error": "no such endpoint"}, 404)
-        except (FFmpegError, RigError, ValueError) as exc:
+        except (FFmpegError, RigError, ProjectError, ValueError) as exc:
             self._json({"error": str(exc)}, 400)
         except Exception as exc:
             traceback.print_exc()
             self._json({"error": str(exc)}, 500)
 
     # -- endpoints ----------------------------------------------------------
+
+    def _project_payload(self, project: Project) -> dict:
+        """Everything the UI needs to restore itself from a project."""
+        return {
+            "root": str(project.root),
+            "file": str(project.file),
+            "name": project.name,
+            "sources": [str(p) for p in project.resolved_sources()],
+            "missing": [str(p) for p in project.missing_sources()],
+            "rig": project.rig.to_dict(),
+            "frames": asdict(project.frames),
+            "output": asdict(project.output),
+            "detect": asdict(project.detect),
+            "stages": {name: project.status(name) for name in STAGES},
+        }
+
+    def api_project_new(self, payload: dict) -> dict:
+        project = Project.create(
+            payload["root"],
+            sources=payload.get("sources", []),
+            name=payload.get("name"),
+            overwrite=bool(payload.get("force")),
+        )
+        self.session.project = project
+        return {"project": self._project_payload(project)}
+
+    def api_project_open(self, payload: dict) -> dict:
+        project = Project.load(payload["path"])
+        self.session.project = project
+        return {"project": self._project_payload(project)}
+
+    def api_project_save(self, payload: dict) -> dict:
+        """Write the UI's current state into the project.
+
+        The project is the source of truth on disk, so the browser hands over
+        everything it holds rather than the server guessing what changed.
+        """
+        project = self.session.project
+        if project is None:
+            root = payload.get("root")
+            if not root:
+                raise ValueError("no project is open; choose a folder first")
+            project = Project(root=Path(root), name=payload.get("name") or Path(root).name)
+            self.session.project = project
+
+        if "rig" in payload:
+            project.rig = rig_from_payload(payload["rig"])
+        if "sources" in payload:
+            project.sources = [project.relative(s) for s in payload["sources"]]
+        for key, target in (("frames", FrameSettings), ("output", OutputSettings),
+                            ("detect", DetectSettings)):
+            if key in payload:
+                current = asdict(getattr(project, key))
+                current.update(payload[key])
+                setattr(project, key, target(**current))
+
+        if payload.get("snapshot"):
+            project.snapshot(payload["snapshot"])
+        project.save()
+        return {"project": self._project_payload(project)}
 
     def api_mask_paint(self, payload: dict) -> dict:
         """Store the painted occluder as an equirect mask file.
@@ -203,7 +283,13 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("no image data received")
 
         raw = base64.b64decode(encoded)
-        target = self.session.cache / "painted_occluder.png"
+        # Into the project when there is one. The temp cache is wiped on reboot, which
+        # would leave the rig pointing at an occluder that no longer exists.
+        if self.session.project is not None:
+            self.session.project.assets_dir.mkdir(parents=True, exist_ok=True)
+            target = self.session.project.assets_dir / "painted_occluder.png"
+        else:
+            target = self.session.cache / "painted_occluder.png"
         target.write_bytes(raw)
 
         if geometric.ignored_fraction(self.session.ffmpeg, target) <= 0.0005:
@@ -407,10 +493,15 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(host: str = "127.0.0.1", port: int = 8360, open_browser: bool = True,
-          ffmpeg_path: str | None = None) -> None:
+          ffmpeg_path: str | None = None, project_path: str | None = None) -> None:
     """Run the UI until interrupted."""
     ffmpeg = resolve_ffmpeg(ffmpeg_path)
-    session = Session(ffmpeg)
+
+    project = None
+    if project_path:
+        project = Project.load(project_path)
+        print(f"project: {project.file}")
+    session = Session(ffmpeg, project)
 
     handler = type("BoundHandler", (Handler,), {"session": session})
     server = ThreadingHTTPServer((host, port), handler)
