@@ -31,7 +31,7 @@ export function CaptureStage(ctx) {
   const local = {
     rig: null, presets: {}, userPresets: new Set(), selected: 0, media: null,
     frames: [], frameIndex: 0, clip: null,
-    nadir: 0, dragging: null, image: null,
+    nadir: 0, dragging: null, dragOffset: { yaw: 0, pitch: 0 }, image: null,
     paint: { mode: null, layer: null, brush: 40, drawing: false, last: null, dirty: false },
     coverage: {}, sizes: {},
   };
@@ -73,7 +73,7 @@ export function CaptureStage(ctx) {
                                          html: icon("trash", { size: 14 }) });
   // FOV and shape are one global rig property applied to every camera, not a per-camera
   // setting -- a mixed-FOV rig is not a case worth the interface it costs.
-  const camFov = slider(20, 150, 1);
+  const camFov = el("input", { type: "number", min: 20, max: 150, step: 1, value: 90 });
   const camShape = el("select", {},
     ...[["1.3333", "4:3"], ["1.5", "3:2"], ["1.7778", "16:9"], ["1", "square"]]
       .map(([value, label]) => el("option", { value }, label)));
@@ -84,18 +84,13 @@ export function CaptureStage(ctx) {
                      onclick: applyPreset }, "Use"),
       deletePresetBtn),
     el("div", { class: "field" }, presetName, savePresetBtn),
-    el("div", { class: "pair" }, field("fov", camFov.root), field("shape", camShape)),
+    el("div", { class: "pair" }, field("fov", camFov), field("shape", camShape)),
     camList,
     el("div", { class: "field", style: "margin-bottom:0" },
       el("button", { class: "btn btn--ghost", type: "button", onclick: addCamera }, "Add"),
       el("button", { class: "btn btn--ghost", type: "button", onclick: duplicateCamera }, "Duplicate"),
       el("button", { class: "btn btn--ghost", type: "button", onclick: removeCamera }, "Remove")));
   presetSelect.addEventListener("change", updatePresetButtons);
-
-  const editor = InspectorSection("Selected camera", { id: "cap-camera" });
-  const camName = el("input", { type: "text" });
-  const camSize = el("p", { class: "hint" });
-  editor.body.append(field("name", camName), camSize);
 
   const image = InspectorSection("Image", { id: "cap-image", note: "unchanged" });
   const gradeInputs = {};
@@ -198,7 +193,7 @@ export function CaptureStage(ctx) {
   // lives in its own flow and every camera shares one global FOV/shape. Their element
   // objects stay constructed (referenced by legacy handlers with harmless defaults) but
   // are never shown.
-  for (const part of [source, rigSection, editor, image, output,
+  for (const part of [source, rigSection, image, output,
                       segments, previewSection]) {
     inspector.append(part.section);
   }
@@ -447,6 +442,13 @@ export function CaptureStage(ctx) {
       if (distance < bestDistance) { bestDistance = distance; best = index; }
     });
     if (best >= 0 && bestDistance < 60) {
+      const camera = local.rig.cameras[best];
+      // Remember where on the footprint the grab landed, so the camera moves with the
+      // cursor by that offset rather than snapping its centre under the pointer.
+      local.dragOffset = {
+        yaw: ((at.yaw - (camera.yaw + local.rig.orientation.yaw) + 540) % 360) - 180,
+        pitch: at.pitch - (camera.pitch + local.rig.orientation.pitch),
+      };
       local.dragging = best;
       canvas.classList.add("is-dragging");
       select(best);
@@ -464,10 +466,13 @@ export function CaptureStage(ctx) {
     if (local.dragging === null || !local.rig) return;
     const at = canvasAngles(event);
     const camera = local.rig.cameras[local.dragging];
-    camera.yaw = Math.round(at.yaw - local.rig.orientation.yaw);
+    const offset = local.dragOffset || { yaw: 0, pitch: 0 };
+    let yaw = at.yaw - local.rig.orientation.yaw - offset.yaw;
+    yaw = ((yaw + 180) % 360 + 360) % 360 - 180;   // keep it in [-180, 180]
+    camera.yaw = Math.round(yaw);
     camera.pitch = Math.max(-90, Math.min(90,
-      Math.round(at.pitch - local.rig.orientation.pitch)));
-    renderCameras(); renderEditor(); draw();
+      Math.round(at.pitch - local.rig.orientation.pitch - offset.pitch)));
+    renderCameras(); draw();
   });
 
   window.addEventListener("mouseup", () => {
@@ -495,15 +500,31 @@ export function CaptureStage(ctx) {
       toggle.addEventListener("click", (event) => event.stopPropagation());
       toggle.addEventListener("change", () => { camera.enabled = toggle.checked; refresh(); });
 
+      // The name is editable in place -- there is no separate Selected-camera panel.
+      const nameInput = el("input", {
+        type: "text", value: camera.name, title: "Rename camera",
+        style: "flex:1;min-width:0;background:none;border:0;border-bottom:1px solid transparent;"
+             + "color:inherit;font:inherit;padding:1px 0;",
+      });
+      // Not wired to select(): selecting rebuilds the list and would drop focus mid-edit.
+      nameInput.addEventListener("click", (event) => event.stopPropagation());
+      nameInput.addEventListener("focus", () => {
+        nameInput.style.borderBottomColor = "var(--border-strong)";
+      });
+      nameInput.addEventListener("blur", () => { nameInput.style.borderBottomColor = "transparent"; });
+      nameInput.addEventListener("change", () => {
+        const next = nameInput.value.trim();
+        if (next && next !== camera.name) { camera.name = next; refresh(); }
+      });
+
       const row = el("div", {
         class: `cam${index === local.selected ? " sel" : ""}${camera.enabled ? "" : " off"}`,
         style: "display:flex;align-items:center;gap:8px;padding:5px 7px;border-radius:5px;cursor:pointer;"
              + (index === local.selected ? "background:var(--accent-tint);" : ""),
         onclick: () => select(index),
       },
-        el("span", { style: `width:10px;height:10px;border-radius:3px;background:${colourOf(index)}` }),
-        el("span", { style: "flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" },
-           camera.name),
+        el("span", { style: `width:10px;height:10px;border-radius:3px;flex:0 0 auto;background:${colourOf(index)}` }),
+        nameInput,
         el("span", { class: "actionbar__detail" },
            `${Math.round(camera.yaw)}° / ${Math.round(camera.pitch)}°`),
         share > 0.005
@@ -513,17 +534,6 @@ export function CaptureStage(ctx) {
       return row;
     }));
     rigSection.setNote(`${local.rig.cameras.filter((c) => c.enabled).length} of ${local.rig.cameras.length} on`);
-  }
-
-  function renderEditor() {
-    const camera = current();
-    if (!camera) return;
-    camName.value = camera.name;
-
-    const size = local.sizes[camera.name];
-    camSize.textContent = size
-      ? `writes ${size[0]}×${size[1]} — native detail for a ${Math.round(camera.h_fov)}° view`
-      : "";
   }
 
   // Global FOV/shape controls reflect the rig (all cameras share them), so sync them
@@ -543,7 +553,7 @@ export function CaptureStage(ctx) {
 
   function applyGlobalFovShape() {
     if (!local.rig) return;
-    const h = camFov.value;
+    const h = parseFloat(camFov.value) || 90;
     const ratio = parseFloat(camShape.value) || 4 / 3;
     for (const camera of local.rig.cameras) {
       camera.h_fov = h;
@@ -554,7 +564,7 @@ export function CaptureStage(ctx) {
 
   function select(index) {
     local.selected = index;
-    renderCameras(); renderEditor(); draw(); previewCamera();
+    renderCameras(); draw(); previewCamera();
   }
 
   function addCamera() {
@@ -973,7 +983,7 @@ export function CaptureStage(ctx) {
   let validateTimer = null;
   function refresh(revalidate = true) {
     readSettings();
-    renderCameras(); renderEditor(); draw(); estimateImages();
+    renderCameras(); draw(); estimateImages();
     if (!revalidate) return;
     ctx.autosave();  // settings changed -> fold it into project.json (debounced)
     clearTimeout(validateTimer);
@@ -983,7 +993,6 @@ export function CaptureStage(ctx) {
           rig: local.rig, source_width: local.media ? local.media.width : 0,
         });
         local.sizes = data.sizes || {};
-        renderEditor();
       } catch (error) { /* shown when the user acts on it */ }
     }, 220);
   }
@@ -1036,12 +1045,9 @@ export function CaptureStage(ctx) {
     img.src = `/frames/${local.clip}/${local.frames[local.frameIndex]}`;
   }
 
-  camName.addEventListener("change", () => {
-    const camera = current(); if (camera) { camera.name = camName.value; refresh(); }
-  });
   // FOV/shape are global: a change rewrites every camera, not just the selected one.
-  camFov.input.addEventListener("input", applyGlobalFovShape);
-  camFov.input.addEventListener("change", previewCamera);
+  camFov.addEventListener("input", applyGlobalFovShape);
+  camFov.addEventListener("change", previewCamera);
   camShape.addEventListener("change", () => { applyGlobalFovShape(); previewCamera(); });
   for (const control of [outFormat, outQuality, orientYaw, orientPitch, frameValue]) {
     control.addEventListener("change", () => refresh());
