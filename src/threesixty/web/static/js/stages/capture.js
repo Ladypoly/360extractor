@@ -153,13 +153,18 @@ export function CaptureStage(ctx) {
 
   const previewSection = InspectorSection("Camera preview", { id: "cap-preview" });
   const previewImage = el("img", { style: "width:100%;border-radius:5px;display:none" });
-  previewSection.body.append(previewImage);
+  const overlayMasks = el("input", { type: "checkbox" });
+  previewSection.body.append(
+    el("div", { class: "field" }, el("label", {}, "overlay masks"), overlayMasks),
+    previewImage);
+  overlayMasks.addEventListener("change", () => previewCamera());
 
   // Occluder and Rig-orientation sections are intentionally not mounted: masking now
   // lives in its own flow and every camera shares one global FOV/shape. Their element
   // objects stay constructed (referenced by legacy handlers with harmless defaults) but
   // are never shown.
-  for (const part of [source, rigSection, image, output, previewSection]) {
+  // Source is chosen on the Start tab now; Capture works on the extracted frames.
+  for (const part of [rigSection, image, output, previewSection]) {
     inspector.append(part.section);
   }
 
@@ -868,14 +873,16 @@ export function CaptureStage(ctx) {
     clearTimeout(previewTimer);
     previewTimer = setTimeout(async () => {
       const camera = current();
-      if (!local.media || !camera || !camera.enabled) {
+      if (!camera || !camera.enabled || (!local.frames.length && !local.media)) {
         previewImage.style.display = "none"; return;
       }
+      const payload = { rig: local.rig, camera: camera.name, width: 420,
+                        overlay: overlayMasks.checked };
+      // Project the extracted frame Capture is working on; fall back to the source video.
+      if (local.frames.length) payload.frame = local.frames[local.frameIndex];
+      else { payload.path = local.media.path; payload.time = parseFloat(timeSlider.value) || 0; }
       try {
-        const data = await ctx.api.post("/api/camera-preview", {
-          path: local.media.path, rig: local.rig, camera: camera.name,
-          time: parseFloat(timeSlider.value) || 0, width: 420,
-        });
+        const data = await ctx.api.post("/api/camera-preview", payload);
         previewImage.src = data.url;
         previewImage.style.display = "block";
       } catch { previewImage.style.display = "none"; }
@@ -972,6 +979,7 @@ export function CaptureStage(ctx) {
     const img = new Image();
     img.onload = () => { local.image = img; fitCanvas(); };
     img.src = `/frames/${local.clip}/${local.frames[local.frameIndex]}`;
+    previewCamera();  // keep the camera preview (and mask overlay) on the same frame
   }
 
   // FOV/shape are global: a change rewrites every camera, not just the selected one.

@@ -68,12 +68,12 @@ class DetectSettings:
     dilate: int = 6
     device: str | None = None
     fuse: bool = True
-    #: Sky is masked out of the splat by default -- it only ever seeds floaters. `method`
-    #: is auto (semantic model when available, else the cone), model, cone, or off. The
-    #: cone masks everything above `sky_cone_angle` degrees of elevation: blunt, but a
-    #: dependency-free guarantee until the semantic model is in.
-    exclude_sky: bool = True
-    sky_method: str = "auto"
+    #: The sky cone: a geometric fallback that masks everything above `sky_cone_angle`
+    #: degrees of elevation. Off by default now that sky is handled as a detection class
+    #: (an open-vocabulary "sky" via YOLO-World follows the real horizon); kept for a
+    #: dependency-free option when ML is unavailable.
+    exclude_sky: bool = False
+    sky_method: str = "cone"
     sky_cone_angle: float = 30.0
 
 

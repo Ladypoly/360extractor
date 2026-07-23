@@ -951,42 +951,79 @@ class Handler(BaseHTTPRequestHandler):
         }
 
     def api_camera_preview(self, payload: dict) -> dict:
-        """What a single camera actually sees -- the ground truth for the overlay."""
-        info = probe_media(payload["path"], self.session.ffmpeg)
+        """What a single camera sees. In the two-stage flow this projects an extracted
+        frame (`frame`) rather than the source video, and can overlay that camera's mask.
+        """
         rig = rig_from_payload(payload["rig"])
         name = payload["camera"]
-
         matches = [c for c in rig.normalized_cameras() if c.name == name]
         if not matches:
             raise RigError(f"no enabled camera named {name!r}")
         camera = matches[0]
 
-        time = float(payload.get("time", 0.0))
+        # Resolve the source: an extracted frame from the project, or a source path/time.
+        project = self.session.project
+        frame_name = payload.get("frame")
+        seek = None
+        if frame_name and project and project.resolved_sources():
+            clip = safe_stem(project.resolved_sources()[0].stem)
+            source_path = frames.frames_dir(project.root, clip) / frame_name
+            if not source_path.exists():
+                raise ValueError(f"no such frame: {frame_name}")
+        else:
+            source_path = Path(payload["path"])
+            if probe_media(source_path, self.session.ffmpeg).is_video:
+                seek = float(payload.get("time", 0.0)) or None
+
         width = int(payload.get("width", 480))
-        # Match the aspect the camera will actually be written at, or the preview
-        # misrepresents the framing it exists to show.
         aspect = (camera.h_fov / camera.v_fov) if rig.output.auto else rig.output.aspect
         height = max(int(width / aspect), 1)
-        target = self.session.next_name(".jpg")
+        tile = self.session.next_name(".jpg")
 
         argv = [str(self.session.ffmpeg.path), "-hide_banner", "-loglevel", "error", "-y"]
-        if info.is_video and time > 0:
-            argv += ["-ss", f"{time:g}"]
-        # Grade first, exactly as the extraction does.
+        if seek:
+            argv += ["-ss", f"{seek:g}"]
         grade = rig.grade.filter_chain()
         argv += [
-            "-i", str(info.path),
+            "-i", str(source_path),
             "-vf", (f"{grade}," if grade else "")
                    + (f"v360=e:rectilinear:yaw={camera.yaw:g}:pitch={camera.pitch:g}:"
                       f"roll={camera.roll:g}:h_fov={camera.h_fov:g}:v_fov={camera.v_fov:g}:"
                       f"w={width}:h={height}:interp={rig.output.interp}"),
-            "-frames:v", "1", "-q:v", "4", str(target),
+            "-frames:v", "1", "-q:v", "4", str(tile),
         ]
         result = subprocess.run(argv, capture_output=True, text=True, errors="replace")
-        if result.returncode != 0 or not target.exists():
+        if result.returncode != 0 or not tile.exists():
             raise FFmpegError(f"camera preview failed: {result.stderr.strip()}")
 
-        return {"url": f"/preview/{target.name}"}
+        # Overlay the generated mask for this camera+frame, tinted red, when asked.
+        mask = None
+        if payload.get("overlay") and frame_name and project:
+            candidate = (project.root / "masks" / clip / name
+                         / f"{Path(frame_name).stem}.png")
+            if candidate.exists():
+                mask = candidate
+        if mask is None:
+            return {"url": f"/preview/{tile.name}", "masked": False}
+
+        tinted = self.session.next_name(".jpg")
+        # The mask sidecar is at the camera's output size, the tile at preview size, so
+        # scale the mask (and the red) to the tile before compositing -- alphamerge needs
+        # matching dimensions.
+        graph = (
+            f"[1:v]format=gray,negate,scale={width}:{height}[m];"
+            f"color=red:size={width}x{height},format=rgba[c];"
+            "[c][m]alphamerge,colorchannelmixer=aa=0.5[tint];"
+            "[0:v][tint]overlay[out]"
+        )
+        composite = [str(self.session.ffmpeg.path), "-hide_banner", "-loglevel", "error",
+                     "-y", "-i", str(tile), "-i", str(mask),
+                     "-filter_complex", graph, "-map", "[out]",
+                     "-frames:v", "1", "-q:v", "4", str(tinted)]
+        result = subprocess.run(composite, capture_output=True, text=True, errors="replace")
+        if result.returncode != 0 or not tinted.exists():
+            return {"url": f"/preview/{tile.name}", "masked": False}
+        return {"url": f"/preview/{tinted.name}", "masked": True}
 
     def api_validate(self, payload: dict) -> dict:
         rig = rig_from_payload(payload["rig"])

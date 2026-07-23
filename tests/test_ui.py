@@ -184,8 +184,11 @@ class TestAutosaveOwnership:
         """Regression: Capture sent sources:[] on autosave and wiped the project source."""
         page.click("#stage-tab-start")
         page.wait_for_timeout(200)
-        # Toggle a Start masking control to trigger an autosave.
-        page.evaluate("document.querySelector('#stage-panel-start input[type=checkbox]').click()")
+        # Change a Start control to trigger an autosave.
+        page.evaluate("""() => {
+            const s = document.querySelector('#stage-panel-start select');
+            s.value = 'fps'; s.dispatchEvent(new Event('change'));
+        }""")
         page.wait_for_timeout(1600)   # autosave debounce + round trip
         project = page.evaluate(
             "async () => (await (await fetch('/api/project')).json()).project")

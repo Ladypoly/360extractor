@@ -113,41 +113,27 @@ export function StartStage(ctx) {
 
   // ── masking ──────────────────────────────────────────────────────────
   const masking = InspectorSection("Masking", { id: "start-masking", open: false });
-  const maskSky = el("input", { type: "checkbox", checked: true });
-  const maskSkyMethod = el("select", {},
-    ...[["auto", "auto (model or cone)"], ["cone", "cone only"], ["off", "off"]]
-      .map(([value, label]) => el("option", { value }, label)));
-  const maskSkyAngle = el("input", { type: "number", min: 0, max: 89, step: 1, value: 30 });
   const maskBackend = el("select", {},
-    ...[["sam2.1", "YOLO + SAM 2.1 (COCO classes)"], ["yolo", "YOLO only (COCO classes)"],
-        ["sam-world", "YOLO-World + SAM (any class, incl. sky)"],
-        ["yolo-world", "YOLO-World (any class, incl. sky)"]]
+    ...[["sam-world", "YOLO-World + SAM (any class, incl. sky)"],
+        ["yolo-world", "YOLO-World (any class, incl. sky)"],
+        ["sam2.1", "YOLO + SAM 2.1 (COCO classes)"], ["yolo", "YOLO only (COCO classes)"]]
       .map(([value, label]) => el("option", { value }, label)));
   const maskClasses = el("input", { type: "text",
-                                    value: "person,car,bus,truck,motorcycle,bicycle" });
+                                    value: "sky,person,car,bus,truck,motorcycle,bicycle" });
   const maskConfidence = el("input", { type: "number", min: 0.05, max: 0.95, step: 0.05, value: 0.25 });
   const maskDilate = el("input", { type: "number", min: 0, max: 40, step: 1, value: 6 });
   const previewMaskBtn = el("button", { class: "btn", type: "button", onclick: runMaskPreview,
     html: `${icon("inspect", { size: 14 })}<span>Preview masking</span>` });
   masking.body.append(
-    el("div", { class: "field" }, el("label", {}, "exclude sky"), maskSky),
-    field("sky via", maskSkyMethod), field("cone °", maskSkyAngle),
-    el("p", { class: "hint" }, "Sky only seeds floaters, so it is masked by default; the "
-      + "cone masks everything above the angle. Red on the panorama is what gets masked out."),
-    field("objects", maskBackend), field("classes", maskClasses),
+    field("detector", maskBackend), field("classes", maskClasses),
     el("div", { class: "pair" }, field("confidence", maskConfidence), field("grow", maskDilate)),
-    el("p", { class: "hint" }, "COCO backends know a fixed set (person, car, …); for "
-      + "anything else — sky, trees, water — use a YOLO-World backend and add the words to "
-      + "classes. Preview runs it on the current frame (first run downloads weights)."),
+    el("p", { class: "hint" }, "Anything you name is masked out of the splat. A YOLO-World "
+      + "detector takes any words (sky, trees, water); the COCO ones only know a fixed set. "
+      + "Preview runs it on the current frame (first run downloads weights)."),
     el("div", { class: "field", style: "margin-bottom:0" }, previewMaskBtn));
   for (const control of [maskBackend, maskClasses, maskConfidence, maskDilate]) {
     control.addEventListener("change", () => ctx.autosave());
   }
-  for (const control of [maskSkyMethod, maskSkyAngle]) {
-    control.addEventListener("change", () => { ctx.autosave(); refreshPreview(); });
-  }
-  maskSkyAngle.addEventListener("input", refreshPreview);
-  maskSky.addEventListener("change", () => { updateMaskFields(); ctx.autosave(); refreshPreview(); });
 
   for (const part of [source, framesSection, segments, masking]) inspector.append(part.section);
 
@@ -325,66 +311,48 @@ export function StartStage(ctx) {
   }
 
   // ── masking logic ────────────────────────────────────────────────────
-  function updateMaskFields() {
-    const on = maskSky.checked;
-    maskSkyMethod.parentElement.hidden = !on;
-    maskSkyAngle.parentElement.hidden = !on || maskSkyMethod.value === "off";
-  }
-
   function readMasking() {
     return {
-      exclude_sky: maskSky.checked, sky_method: maskSkyMethod.value,
-      sky_cone_angle: parseFloat(maskSkyAngle.value) || 30,
       backend: maskBackend.value,
       classes: maskClasses.value.split(",").map((s) => s.trim()).filter(Boolean),
       confidence: parseFloat(maskConfidence.value) || 0.25,
       dilate: parseInt(maskDilate.value, 10) || 0,
+      exclude_sky: false,   // sky is handled as a detection class now, not the cone
     };
   }
 
   function writeMasking(detect) {
     if (!detect) return;
-    maskSky.checked = detect.exclude_sky !== false;
-    maskSkyMethod.value = detect.sky_method || "auto";
-    maskSkyAngle.value = detect.sky_cone_angle != null ? detect.sky_cone_angle : 30;
-    maskBackend.value = detect.backend || "sam2.1";
+    maskBackend.value = detect.backend || "sam-world";
     maskClasses.value = (detect.classes || []).join(",");
     maskConfidence.value = detect.confidence != null ? detect.confidence : 0.25;
     maskDilate.value = detect.dilate != null ? detect.dilate : 6;
-    updateMaskFields();
   }
 
-  // The panorama at the scrubbed time, with the mask tinted on top when sky exclusion is
-  // on, so a frame can be picked and the masking checked before Process runs.
+  // The plain panorama at the scrubbed time. Detection is expensive, so the mask overlay
+  // is on-demand behind the Preview button rather than on every scrub.
   let previewTimer = null;
   function refreshPreview() {
     clearTimeout(previewTimer);
     previewTimer = setTimeout(async () => {
       if (!local.media) return;
-      const time = parseFloat(previewTime.value) || 0;
-      const masked = maskSky.checked && maskSkyMethod.value !== "off";
       try {
-        const { url } = masked
-          ? await ctx.api.post("/api/mask/preview", {
-              path: local.media.path, time,
-              sky_cone_angle: parseFloat(maskSkyAngle.value) || 30 })
-          : await ctx.api.post("/api/preview", { path: local.media.path, time });
+        const { url } = await ctx.api.post("/api/preview",
+          { path: local.media.path, time: parseFloat(previewTime.value) || 0 });
         previewImg.src = url;
       } catch { /* keep the frame that is showing */ }
     }, 250);
   }
 
-  // Run the full masking (sky + object detection) on the current frame, on demand.
+  // Run detection on the current frame, on demand, and tint the result over it.
   async function runMaskPreview() {
     if (!local.media) { ctx.flash("Load a source first.", { level: "warn" }); return; }
-    const skyOn = maskSky.checked && maskSkyMethod.value !== "off";
     previewMaskBtn.disabled = true;
     previewMaskBtn.querySelector("span").textContent = "Running…";
     try {
       const { url } = await ctx.api.post("/api/mask/preview", {
         path: local.media.path, time: parseFloat(previewTime.value) || 0,
         objects: true, detect: readMasking(),
-        sky_cone_angle: skyOn ? (parseFloat(maskSkyAngle.value) || 30) : null,
       });
       previewImg.src = url;
     } catch (error) { ctx.report(error); }
@@ -395,7 +363,6 @@ export function StartStage(ctx) {
   }
 
   updateSegFields();
-  updateMaskFields();
 
   return {
     panel,
