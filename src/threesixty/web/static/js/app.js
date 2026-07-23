@@ -109,7 +109,11 @@ function autosave() {
   autosaveTimer = setTimeout(async () => {
     if (!state.project) return;
     try {
-      const payload = stages.capture ? stages.capture.projectPayload() : {};
+      // Each stage contributes the settings it owns (Start: masking; Capture: rig etc.).
+      const payload = {};
+      for (const stage of Object.values(stages)) {
+        if (stage.projectPayload) Object.assign(payload, stage.projectPayload());
+      }
       const { project } = await api.post("/api/project/save", payload);
       state.project = project;
       topbar.setProject(project);

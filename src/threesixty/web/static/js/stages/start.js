@@ -65,7 +65,65 @@ export function StartStage(ctx) {
   });
   frameValue.addEventListener("change", () => { updateEstimate(); ctx.autosave(); });
 
-  for (const part of [source, framesSection]) inspector.append(part.section);
+  // ── segments ─────────────────────────────────────────────────────────
+  const segments = InspectorSection("Segments", { id: "start-segments", open: false });
+  const segMode = el("select", {},
+    ...[["off", "one project (no split)"], ["duration", "by duration"],
+        ["motion-distance", "by distance (from video motion)"],
+        ["motion-count", "by count (equal travel)"],
+        ["gpx", "by distance (GPS track)"]]
+      .map(([value, label]) => el("option", { value }, label)));
+  const segSeconds = el("input", { type: "number", value: 60, min: 1, step: 5 });
+  const segMeters = el("input", { type: "number", value: 500, min: 10, step: 50 });
+  const segSpeed = el("input", { type: "number", value: 40, min: 1, step: 5 });
+  const segCount = el("input", { type: "number", value: 4, min: 1, step: 1 });
+  const segCreateBtn = el("button", { class: "btn btn--primary", type: "button",
+                                      onclick: createSegments,
+                                      html: `${icon("layers", { size: 14 })}<span>Create segments</span>` });
+  const segResults = el("div", { class: "landing__recent" });
+  const segFields = {
+    duration: field("seconds", segSeconds), meters: field("metres", segMeters),
+    speed: field("avg km/h", segSpeed), count: field("segments", segCount),
+  };
+  const segHint = el("p", { class: "hint" });
+  segments.body.append(
+    field("split", segMode),
+    segFields.duration, segFields.meters, segFields.speed, segFields.count,
+    segHint,
+    el("div", { class: "field", style: "margin-bottom:0" }, segCreateBtn),
+    segResults);
+  segMode.addEventListener("change", updateSegFields);
+
+  // ── masking ──────────────────────────────────────────────────────────
+  const masking = InspectorSection("Masking", { id: "start-masking", open: false });
+  const maskSky = el("input", { type: "checkbox", checked: true });
+  const maskSkyMethod = el("select", {},
+    ...[["auto", "auto (model or cone)"], ["cone", "cone only"], ["off", "off"]]
+      .map(([value, label]) => el("option", { value }, label)));
+  const maskSkyAngle = el("input", { type: "number", min: 0, max: 89, step: 1, value: 30 });
+  const maskBackend = el("select", {},
+    ...[["sam2.1", "YOLO + SAM 2.1"], ["yolo", "YOLO only"]]
+      .map(([value, label]) => el("option", { value }, label)));
+  const maskClasses = el("input", { type: "text",
+                                    value: "person,car,bus,truck,motorcycle,bicycle" });
+  const maskConfidence = el("input", { type: "number", min: 0.05, max: 0.95, step: 0.05, value: 0.25 });
+  const maskDilate = el("input", { type: "number", min: 0, max: 40, step: 1, value: 6 });
+  masking.body.append(
+    el("div", { class: "field" }, el("label", {}, "exclude sky"), maskSky),
+    field("sky via", maskSkyMethod), field("cone °", maskSkyAngle),
+    el("p", { class: "hint" }, "Sky only seeds floaters, so it is masked by default; "
+      + "the cone masks everything above the angle."),
+    field("objects", maskBackend), field("classes", maskClasses),
+    el("div", { class: "pair" }, field("confidence", maskConfidence), field("grow", maskDilate)),
+    el("p", { class: "hint" }, "Object detection needs the ML extra and runs when cameras "
+      + "are generated."));
+  for (const control of [maskSkyMethod, maskSkyAngle, maskBackend, maskClasses,
+                         maskConfidence, maskDilate]) {
+    control.addEventListener("change", () => ctx.autosave());
+  }
+  maskSky.addEventListener("change", () => { updateMaskFields(); ctx.autosave(); });
+
+  for (const part of [source, framesSection, segments, masking]) inspector.append(part.section);
 
   // ── process action ─────────────────────────────────────────────────────
   const actionBar = StageActionBar({
@@ -167,8 +225,106 @@ export function StartStage(ctx) {
     } catch { /* the list is a convenience */ }
   }
 
+  // ── segments logic ───────────────────────────────────────────────────
+  const SEG_SHOW = {
+    off: [], duration: ["duration"], "motion-distance": ["meters", "speed"],
+    "motion-count": ["count"], gpx: ["meters"],
+  };
+  const SEG_HINT = {
+    off: "The whole clip becomes one project.",
+    duration: "Cut every N seconds.",
+    "motion-distance": "Estimates forward travel from the video (needs the ML extra). "
+      + "Average speed turns motion into approximate metres.",
+    "motion-count": "Splits into equal-travel pieces from video motion (needs ML). "
+      + "No speed needed — distances are approximate.",
+    gpx: "Cuts by true metres along a <clip>.gpx track placed beside the video.",
+  };
+
+  function updateSegFields() {
+    const show = new Set(SEG_SHOW[segMode.value] || []);
+    for (const [key, node] of Object.entries(segFields)) node.hidden = !show.has(key);
+    segHint.textContent = SEG_HINT[segMode.value] || "";
+    segCreateBtn.hidden = segMode.value === "off";
+  }
+
+  async function createSegments() {
+    if (!local.media) { ctx.flash("Load a source first.", { level: "warn" }); return; }
+    const mode = segMode.value;
+    const payload = { path: local.media.path };
+    if (mode === "duration") {
+      payload.mode = "duration"; payload.seconds = parseFloat(segSeconds.value) || 60;
+    } else if (mode === "motion-distance") {
+      const speed = parseFloat(segSpeed.value) || 0;
+      if (!speed) { ctx.flash("Enter an average speed for metre-based segments.",
+                              { level: "warn" }); return; }
+      payload.mode = "motion";
+      payload.meters = parseFloat(segMeters.value) || 500; payload.speed_kph = speed;
+    } else if (mode === "motion-count") {
+      payload.mode = "motion"; payload.count = parseInt(segCount.value, 10) || 2;
+    } else if (mode === "gpx") {
+      payload.mode = "gpx"; payload.meters = parseFloat(segMeters.value) || 500;
+    } else { return; }
+
+    segCreateBtn.disabled = true;
+    segCreateBtn.querySelector("span").textContent = "Analysing…";
+    try {
+      const { segments: made } = await ctx.api.post("/api/segment", payload);
+      segResults.replaceChildren();
+      for (const seg of made) {
+        const span = `${seg.start.toFixed(1)}–${seg.end.toFixed(1)}s`;
+        const dist = seg.distance != null
+          ? `  ·  ${seg.approximate ? "≈" : ""}${Math.round(seg.distance)} m` : "";
+        segResults.append(el("button", {
+          class: "landing__recent-item", type: "button", title: seg.root,
+          onclick: () => ctx.openRecent(seg.root),
+        },
+          el("span", { class: "landing__recent-name" }, seg.name),
+          el("span", { class: "landing__recent-path" }, span + dist)));
+      }
+      ctx.flash(`Created ${made.length} segment project${made.length === 1 ? "" : "s"}.`);
+    } catch (error) { ctx.report(error); }
+    finally {
+      segCreateBtn.disabled = false;
+      segCreateBtn.querySelector("span").textContent = "Create segments";
+    }
+  }
+
+  // ── masking logic ────────────────────────────────────────────────────
+  function updateMaskFields() {
+    const on = maskSky.checked;
+    maskSkyMethod.parentElement.hidden = !on;
+    maskSkyAngle.parentElement.hidden = !on || maskSkyMethod.value === "off";
+  }
+
+  function readMasking() {
+    return {
+      exclude_sky: maskSky.checked, sky_method: maskSkyMethod.value,
+      sky_cone_angle: parseFloat(maskSkyAngle.value) || 30,
+      backend: maskBackend.value,
+      classes: maskClasses.value.split(",").map((s) => s.trim()).filter(Boolean),
+      confidence: parseFloat(maskConfidence.value) || 0.25,
+      dilate: parseInt(maskDilate.value, 10) || 0,
+    };
+  }
+
+  function writeMasking(detect) {
+    if (!detect) return;
+    maskSky.checked = detect.exclude_sky !== false;
+    maskSkyMethod.value = detect.sky_method || "auto";
+    maskSkyAngle.value = detect.sky_cone_angle != null ? detect.sky_cone_angle : 30;
+    maskBackend.value = detect.backend || "sam2.1";
+    maskClasses.value = (detect.classes || []).join(",");
+    maskConfidence.value = detect.confidence != null ? detect.confidence : 0.25;
+    maskDilate.value = detect.dilate != null ? detect.dilate : 6;
+    updateMaskFields();
+  }
+
+  updateSegFields();
+  updateMaskFields();
+
   return {
     panel,
+    projectPayload: () => ({ detect: readMasking() }),
     onEnter: () => refreshRecent(),
     onJobs: (_job, allJobs) => {
       const capture = allJobs.capture;
@@ -180,14 +336,13 @@ export function StartStage(ctx) {
       }
       lastState = capture ? capture.state : null;
     },
-    applyProject(project, { keepMedia } = {}) {
+    applyProject(project) {
       if (!project) return;
       frameMode.value = project.frames.mode;
       frameValue.value = project.frames.value;
+      writeMasking(project.detect);
       updateEstimate();
-      if (!keepMedia && project.sources && project.sources.length) {
-        pathField.value = project.sources[0];
-      }
+      if (project.sources && project.sources.length) pathField.value = project.sources[0];
     },
   };
 }
