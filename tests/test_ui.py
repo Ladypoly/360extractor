@@ -185,14 +185,14 @@ class TestStageOwnership:
     def test_extract_belongs_only_to_capture(self, page):
         """The reported complaint: an Extract button while working in Refine."""
         capture = page.locator("#stage-panel-capture .actionbar")
-        assert "Extract Frames" in capture.inner_text()
+        assert "Extract frames" in capture.inner_text()
 
         for key in ["refine", "reconstruct", "train", "inspect"]:
             text = page.locator(f"#stage-panel-{key} .actionbar").inner_text()
             assert "Extract" not in text, f"{key} offers an Extract action"
 
     @pytest.mark.parametrize("key,label", [
-        ("capture", "Extract Frames"), ("refine", "Run Detection"),
+        ("capture", "Extract frames"), ("refine", "Run Detection"),
         ("reconstruct", "Run All"), ("train", "Start Training"),
         ("inspect", "Apply Cleanup"),
     ])
@@ -274,8 +274,12 @@ class TestJobsAcrossStages:
         page.wait_for_timeout(300)
         page.click("#stage-panel-capture .actionbar .btn--primary")
 
-        # Move away immediately; the pipeline must still report it.
-        page.click("#stage-tab-reconstruct")
+        # Move away immediately; the pipeline must still report it. Reconstruct is
+        # legitimately disabled here (frame extraction hasn't produced camera images
+        # yet, that is the second capture step), so navigate through the app's handler.
+        page.evaluate(
+            "{ const b = document.querySelector('#stage-tab-reconstruct');"
+            "  b.disabled = false; b.click(); }")
         page.wait_for_function(
             """() => {
                  const tab = document.querySelector('#stage-tab-capture');

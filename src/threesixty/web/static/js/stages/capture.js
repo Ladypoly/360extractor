@@ -30,6 +30,7 @@ const FULL_WIDTH = 1600;
 export function CaptureStage(ctx) {
   const local = {
     rig: null, presets: {}, userPresets: new Set(), selected: 0, media: null,
+    frames: [], frameIndex: 0, clip: null,
     nadir: 0, dragging: null, image: null,
     paint: { mode: null, layer: null, brush: 40, drawing: false, last: null, dirty: false },
     coverage: {}, sizes: {},
@@ -204,8 +205,8 @@ export function CaptureStage(ctx) {
 
   // ── action bar ───────────────────────────────────────────────────────
   const actionBar = StageActionBar({
-    primaryLabel: "Extract Frames",
-    onPrimary: extract,
+    primaryLabel: "Extract frames",
+    onPrimary: runCapture,
     onCancel: () => ctx.api.jobs.cancel("capture").then(ctx.pokeJobs),
   });
 
@@ -884,6 +885,9 @@ export function CaptureStage(ctx) {
 
       updateLanding();
       refresh(); previewCamera(); refreshCoverage();
+      // If this project already has extracted frames, switch the canvas to them and set
+      // the button to Generate cameras; otherwise the preview stays and it reads Extract.
+      refreshFrames();
     } catch (error) { ctx.report(error); }
   }
 
@@ -908,9 +912,17 @@ export function CaptureStage(ctx) {
   }
 
   timeSlider.addEventListener("input", () => {
-    timeLabel.textContent = `${(parseFloat(timeSlider.value) || 0).toFixed(1)}s`;
+    if (local.frames.length) {
+      const i = Math.round(parseFloat(timeSlider.value) || 0);
+      timeLabel.textContent = `frame ${i + 1} / ${local.frames.length}`;
+    } else {
+      timeLabel.textContent = `${(parseFloat(timeSlider.value) || 0).toFixed(1)}s`;
+    }
   });
-  timeSlider.addEventListener("change", loadMedia);
+  timeSlider.addEventListener("change", () => {
+    if (local.frames.length) loadFrame(Math.round(parseFloat(timeSlider.value) || 0));
+    else loadMedia();
+  });
 
   let previewTimer = null;
   function previewCamera() {
@@ -976,19 +988,52 @@ export function CaptureStage(ctx) {
     }, 220);
   }
 
-  async function extract() {
+  // Capture is two stages sharing one button: first extract equirect frames into the
+  // working set, then -- once they exist -- project them through the rig into camera
+  // tiles. The primary action label follows which step is next.
+  async function runCapture() {
     if (!local.media) { ctx.flash("Load a source first.", { level: "warn" }); return; }
     readSettings();
-    const root = outDir.value.trim();
-    if (!root) { ctx.flash("Choose an output folder.", { level: "warn" }); return; }
+    if (!local.frames.length) return extractFrames();
+    return generateCameras();
+  }
+
+  async function extractFrames() {
     try {
-      await ctx.api.post("/api/extract", {
-        sources: [local.media.path], rig: local.rig,
+      await ctx.api.post("/api/frames/extract", {
         mode: frameMode.value, value: parseFloat(frameValue.value) || 2,
-        output_dir: root, resume: true, mask_mode: maskMode.value,
       });
       ctx.pokeJobs();
     } catch (error) { ctx.report(error); }
+  }
+
+  async function generateCameras() {
+    try {
+      await ctx.api.post("/api/cameras/generate", { rig: local.rig });
+      ctx.pokeJobs();
+    } catch (error) { ctx.report(error); }
+  }
+
+  async function refreshFrames() {
+    try {
+      const { clip, frames } = await ctx.api.get("/api/frames/list");
+      local.clip = clip;
+      local.frames = frames || [];
+      actionBar.setPrimaryLabel(local.frames.length ? "Generate cameras" : "Extract frames");
+      if (local.frames.length) {
+        timeSlider.max = local.frames.length - 1;
+        loadFrame(Math.min(local.frameIndex, local.frames.length - 1));
+      }
+    } catch { /* leave the viewer as it is */ }
+  }
+
+  function loadFrame(index) {
+    if (!local.frames.length || !local.clip) return;
+    local.frameIndex = Math.max(0, Math.min(index, local.frames.length - 1));
+    timeSlider.value = local.frameIndex;
+    const img = new Image();
+    img.onload = () => { local.image = img; fitCanvas(); };
+    img.src = `/frames/${local.clip}/${local.frames[local.frameIndex]}`;
   }
 
   camName.addEventListener("change", () => {
@@ -1025,10 +1070,17 @@ export function CaptureStage(ctx) {
     } catch (error) { ctx.report(error); }
   })();
 
+  let lastCaptureState = null;
   return {
     panel,
-    onJobs: (job) => actionBar.render(job),
-    onEnter: () => { updateLanding(); fitCanvas(); },
+    onJobs: (job) => {
+      actionBar.render(job);
+      // When a capture job finishes, the working set changed: reload the frame list so
+      // the button flips Extract frames -> Generate cameras and the viewer updates.
+      if (job && job.state === "done" && lastCaptureState === "running") refreshFrames();
+      lastCaptureState = job ? job.state : null;
+    },
+    onEnter: () => { updateLanding(); refreshFrames(); fitCanvas(); },
     applyProject(project, { keepMedia } = {}) {
       if (!project) return;
       local.rig = project.rig;
