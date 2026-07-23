@@ -108,20 +108,25 @@ export function StartStage(ctx) {
                                     value: "person,car,bus,truck,motorcycle,bicycle" });
   const maskConfidence = el("input", { type: "number", min: 0.05, max: 0.95, step: 0.05, value: 0.25 });
   const maskDilate = el("input", { type: "number", min: 0, max: 40, step: 1, value: 6 });
+  const maskPreview = el("img", { class: "mask-preview", style: "display:none" });
   masking.body.append(
     el("div", { class: "field" }, el("label", {}, "exclude sky"), maskSky),
     field("sky via", maskSkyMethod), field("cone °", maskSkyAngle),
     el("p", { class: "hint" }, "Sky only seeds floaters, so it is masked by default; "
-      + "the cone masks everything above the angle."),
+      + "the cone masks everything above the angle. Red is what gets masked out."),
+    maskPreview,
     field("objects", maskBackend), field("classes", maskClasses),
     el("div", { class: "pair" }, field("confidence", maskConfidence), field("grow", maskDilate)),
     el("p", { class: "hint" }, "Object detection needs the ML extra and runs when cameras "
       + "are generated."));
-  for (const control of [maskSkyMethod, maskSkyAngle, maskBackend, maskClasses,
-                         maskConfidence, maskDilate]) {
+  for (const control of [maskBackend, maskClasses, maskConfidence, maskDilate]) {
     control.addEventListener("change", () => ctx.autosave());
   }
-  maskSky.addEventListener("change", () => { updateMaskFields(); ctx.autosave(); });
+  for (const control of [maskSkyMethod, maskSkyAngle]) {
+    control.addEventListener("change", () => { ctx.autosave(); refreshMaskPreview(); });
+  }
+  maskSkyAngle.addEventListener("input", refreshMaskPreview);
+  maskSky.addEventListener("change", () => { updateMaskFields(); ctx.autosave(); refreshMaskPreview(); });
 
   for (const part of [source, framesSection, segments, masking]) inspector.append(part.section);
 
@@ -188,6 +193,7 @@ export function StartStage(ctx) {
         frames: { mode: frameMode.value, value: parseFloat(frameValue.value) || 2 },
       });
       ctx.applyProject(project, { keepMedia: true });
+      refreshMaskPreview();
     } catch (error) { ctx.report(error); }
   }
 
@@ -317,6 +323,26 @@ export function StartStage(ctx) {
     maskConfidence.value = detect.confidence != null ? detect.confidence : 0.25;
     maskDilate.value = detect.dilate != null ? detect.dilate : 6;
     updateMaskFields();
+  }
+
+  // A live look at what will be masked, tinted over the panorama, so it can be checked
+  // (or the cone adjusted) before Process runs. The sky mask is the same on every frame.
+  let maskPreviewTimer = null;
+  function refreshMaskPreview() {
+    clearTimeout(maskPreviewTimer);
+    maskPreviewTimer = setTimeout(async () => {
+      if (!local.media || !maskSky.checked || maskSkyMethod.value === "off") {
+        maskPreview.style.display = "none"; return;
+      }
+      try {
+        const { url } = await ctx.api.post("/api/mask/preview", {
+          path: local.media.path,
+          sky_cone_angle: parseFloat(maskSkyAngle.value) || 30,
+        });
+        maskPreview.src = url;
+        maskPreview.style.display = "block";
+      } catch { maskPreview.style.display = "none"; }
+    }, 300);
   }
 
   updateSegFields();

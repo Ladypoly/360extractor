@@ -416,6 +416,11 @@ dialog::backdrop { background: rgba(0, 0, 0, .55); }
 
 /* ── start tab ───────────────────────────────────────────────────────── */
 
+.mask-preview {
+  width: 100%; border-radius: 5px; margin-top: var(--s2);
+  border: 1px solid var(--border);
+}
+
 .start__workspace {
   grid-area: work;
   background: var(--workspace-bg);

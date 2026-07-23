@@ -302,6 +302,29 @@ class TestTwoStageCapture:
         assert "extract frames" in body["error"]
 
 
+class TestMaskPreview:
+    def test_returns_a_tinted_preview_for_the_sky_cone(self, make_ui, tmp_path,
+                                                       equirect_clip):
+        source = tmp_path / "drive.mp4"
+        shutil.copy(equirect_clip, source)
+        project = Project.create(tmp_path / "proj", sources=[str(source)])
+        base, _ = make_ui(project)
+
+        status, body = post(base, "/api/mask/preview",
+                            {"path": str(source), "sky_cone_angle": 30})
+        assert status == 200 and body["url"].startswith("/preview/")
+        with urllib.request.urlopen(base + body["url"], timeout=30) as response:
+            assert response.status == 200
+            assert response.read(3) == b"\xff\xd8\xff"        # JPEG
+
+    def test_no_occluders_returns_the_plain_frame(self, make_ui, tmp_path, equirect_clip):
+        source = tmp_path / "drive.mp4"
+        shutil.copy(equirect_clip, source)
+        base, _ = make_ui(Project.create(tmp_path / "proj", sources=[str(source)]))
+        status, body = post(base, "/api/mask/preview", {"path": str(source)})
+        assert status == 200 and body.get("empty") is True
+
+
 class TestSegmentEndpoint:
     def _drive(self, tmp_path, equirect_clip):
         source = tmp_path / "drive.mp4"
