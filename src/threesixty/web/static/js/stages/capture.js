@@ -1043,10 +1043,10 @@ export function CaptureStage(ctx) {
     },
     projectPayload() {
       readSettings();
+      // Capture owns the rig and output only. Source, frames, and masking belong to
+      // Start; sending them here (with no media loaded on this tab) would wipe them.
       return {
         rig: local.rig,
-        sources: local.media ? [local.media.path] : [],
-        frames: { mode: frameMode.value, value: parseFloat(frameValue.value) || 2 },
         output: { mask_mode: maskMode.value },
       };
     },

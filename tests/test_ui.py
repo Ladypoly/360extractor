@@ -179,6 +179,19 @@ class TestLanding:
             page.close()
 
 
+class TestAutosaveOwnership:
+    def test_autosave_keeps_the_source(self, page):
+        """Regression: Capture sent sources:[] on autosave and wiped the project source."""
+        page.click("#stage-tab-start")
+        page.wait_for_timeout(200)
+        # Toggle a Start masking control to trigger an autosave.
+        page.evaluate("document.querySelector('#stage-panel-start input[type=checkbox]').click()")
+        page.wait_for_timeout(1600)   # autosave debounce + round trip
+        project = page.evaluate(
+            "async () => (await (await fetch('/api/project')).json()).project")
+        assert project and project["sources"], "autosave wiped the source"
+
+
 class TestStageOwnership:
     def test_extract_belongs_only_to_capture(self, page):
         """The reported complaint: an Extract button while working in Refine."""

@@ -8,7 +8,7 @@ import { icon } from "../icons.js";
 export function StartStage(ctx) {
   const local = { media: null };
 
-  // ── workspace: recent projects + a drop target ─────────────────────────
+  // ── workspace: the loaded panorama (with a scrubber) or the project hub ─
   const recentList = el("div", { class: "landing__recent" });
   const dropZone = el("div", { class: "landing__drop" },
     el("div", { class: "landing__icon", html: icon("camera", { size: 40 }) }),
@@ -16,11 +16,28 @@ export function StartStage(ctx) {
     el("div", { class: "landing__hint" }, "Drag a video here, or use Browse in the panel"),
     el("p", { class: "landing__note" },
       "A project folder is created next to the video; opening the same video later resumes it."));
+
+  // Once a source is loaded, the middle shows the panorama at the scrubbed time, with
+  // the mask overlay tinted on top so a frame can be picked and checked before Process.
+  const previewImg = el("img", { class: "start-preview__img" });
+  const previewTime = el("input", { type: "range", min: 0, max: 0, step: 0.1, value: 0,
+                                    style: "flex:1" });
+  const previewLabel = el("span", { class: "actionbar__detail" }, "0.0s");
+  const previewPane = el("div", { class: "start-preview", hidden: true },
+    el("div", { class: "start-preview__frame" }, previewImg),
+    el("div", { class: "log__bar" },
+      el("span", {}, "frame"), previewTime, previewLabel));
+
   const workspace = el("div", { class: "start__workspace" },
-    dropZone,
+    el("div", { class: "start__main" }, dropZone, previewPane),
     el("div", { class: "landing__side" },
       el("div", { class: "landing__side-title" }, "Recent projects"),
       recentList));
+
+  previewTime.addEventListener("input", () => {
+    previewLabel.textContent = `${(parseFloat(previewTime.value) || 0).toFixed(1)}s`;
+  });
+  previewTime.addEventListener("change", refreshPreview);
 
   dropZone.addEventListener("dragover", (event) => {
     event.preventDefault(); dropZone.classList.add("landing__drop--over");
@@ -108,13 +125,11 @@ export function StartStage(ctx) {
                                     value: "person,car,bus,truck,motorcycle,bicycle" });
   const maskConfidence = el("input", { type: "number", min: 0.05, max: 0.95, step: 0.05, value: 0.25 });
   const maskDilate = el("input", { type: "number", min: 0, max: 40, step: 1, value: 6 });
-  const maskPreview = el("img", { class: "mask-preview", style: "display:none" });
   masking.body.append(
     el("div", { class: "field" }, el("label", {}, "exclude sky"), maskSky),
     field("sky via", maskSkyMethod), field("cone °", maskSkyAngle),
-    el("p", { class: "hint" }, "Sky only seeds floaters, so it is masked by default; "
-      + "the cone masks everything above the angle. Red is what gets masked out."),
-    maskPreview,
+    el("p", { class: "hint" }, "Sky only seeds floaters, so it is masked by default; the "
+      + "cone masks everything above the angle. Red on the panorama is what gets masked out."),
     field("objects", maskBackend), field("classes", maskClasses),
     el("div", { class: "pair" }, field("confidence", maskConfidence), field("grow", maskDilate)),
     el("p", { class: "hint" }, "Object detection needs the ML extra and runs when cameras "
@@ -123,10 +138,10 @@ export function StartStage(ctx) {
     control.addEventListener("change", () => ctx.autosave());
   }
   for (const control of [maskSkyMethod, maskSkyAngle]) {
-    control.addEventListener("change", () => { ctx.autosave(); refreshMaskPreview(); });
+    control.addEventListener("change", () => { ctx.autosave(); refreshPreview(); });
   }
-  maskSkyAngle.addEventListener("input", refreshMaskPreview);
-  maskSky.addEventListener("change", () => { updateMaskFields(); ctx.autosave(); refreshMaskPreview(); });
+  maskSkyAngle.addEventListener("input", refreshPreview);
+  maskSky.addEventListener("change", () => { updateMaskFields(); ctx.autosave(); refreshPreview(); });
 
   for (const part of [source, framesSection, segments, masking]) inspector.append(part.section);
 
@@ -187,13 +202,21 @@ export function StartStage(ctx) {
       local.media = data.media;
       ctx.setSource(data.media);
       updateMediaInfo(); updateEstimate();
+
+      // Show the panorama in the middle with a scrubber; hide the drop target.
+      previewTime.max = data.media.is_video ? Math.max(data.media.duration - 0.1, 0) : 0;
+      previewTime.value = 0;
+      previewLabel.textContent = "0.0s";
+      dropZone.hidden = true;
+      previewPane.hidden = false;
+
       // Opening a source is opening its project, created beside the video.
       const { project } = await ctx.api.post("/api/project/for-source", {
         path: data.media.path,
         frames: { mode: frameMode.value, value: parseFloat(frameValue.value) || 2 },
       });
       ctx.applyProject(project, { keepMedia: true });
-      refreshMaskPreview();
+      refreshPreview();
     } catch (error) { ctx.report(error); }
   }
 
@@ -325,24 +348,24 @@ export function StartStage(ctx) {
     updateMaskFields();
   }
 
-  // A live look at what will be masked, tinted over the panorama, so it can be checked
-  // (or the cone adjusted) before Process runs. The sky mask is the same on every frame.
-  let maskPreviewTimer = null;
-  function refreshMaskPreview() {
-    clearTimeout(maskPreviewTimer);
-    maskPreviewTimer = setTimeout(async () => {
-      if (!local.media || !maskSky.checked || maskSkyMethod.value === "off") {
-        maskPreview.style.display = "none"; return;
-      }
+  // The panorama at the scrubbed time, with the mask tinted on top when sky exclusion is
+  // on, so a frame can be picked and the masking checked before Process runs.
+  let previewTimer = null;
+  function refreshPreview() {
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(async () => {
+      if (!local.media) return;
+      const time = parseFloat(previewTime.value) || 0;
+      const masked = maskSky.checked && maskSkyMethod.value !== "off";
       try {
-        const { url } = await ctx.api.post("/api/mask/preview", {
-          path: local.media.path,
-          sky_cone_angle: parseFloat(maskSkyAngle.value) || 30,
-        });
-        maskPreview.src = url;
-        maskPreview.style.display = "block";
-      } catch { maskPreview.style.display = "none"; }
-    }, 300);
+        const { url } = masked
+          ? await ctx.api.post("/api/mask/preview", {
+              path: local.media.path, time,
+              sky_cone_angle: parseFloat(maskSkyAngle.value) || 30 })
+          : await ctx.api.post("/api/preview", { path: local.media.path, time });
+        previewImg.src = url;
+      } catch { /* keep the frame that is showing */ }
+    }, 250);
   }
 
   updateSegFields();
@@ -350,7 +373,14 @@ export function StartStage(ctx) {
 
   return {
     panel,
-    projectPayload: () => ({ detect: readMasking() }),
+    projectPayload: () => {
+      const payload = {
+        detect: readMasking(),
+        frames: { mode: frameMode.value, value: parseFloat(frameValue.value) || 2 },
+      };
+      if (local.media) payload.sources = [local.media.path];
+      return payload;
+    },
     onEnter: () => refreshRecent(),
     onJobs: (_job, allJobs) => {
       const capture = allJobs.capture;
