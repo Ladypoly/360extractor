@@ -148,8 +148,9 @@ class YoloBackend:
         unknown = [c for c in self.classes if c.lower() not in known]
         if unknown:
             raise MaskError(
-                f"{model} does not know the class(es) {unknown}. It knows: "
-                f"{', '.join(sorted(known))}"
+                f"{model} does not know the class(es) {unknown}. For open-vocabulary "
+                f"classes like these (e.g. sky), use a YOLO-World backend. This model "
+                f"knows: {', '.join(sorted(known))}"
             )
         self._wanted = {index for index, name in self.model.names.items()
                         if name.lower() in {c.lower() for c in self.classes}}
@@ -187,6 +188,52 @@ class YoloBackend:
                 detections=detections,
                 mask=combine((height, width), detections, self.dilate),
             ))
+        return results
+
+
+class YoloWorldBackend:
+    """Open-vocabulary detection: any text class, including stuff COCO lacks like sky.
+
+    YOLO-World takes the class names as a text prompt rather than a fixed vocabulary, so
+    "sky", "clouds", "trees" all work. It is a detector (boxes), not a segmenter, so on
+    its own the mask is box-shaped -- wrap it in SAM (the sam-world backend) to get the
+    real outline, which for sky follows the horizon instead of a flat cone.
+    """
+
+    name = "yolo-world"
+
+    def __init__(self, model: str = "yolov8s-worldv2.pt",
+                 classes: Sequence[str] = DEFAULT_CLASSES,
+                 confidence: float = DEFAULT_CONFIDENCE,
+                 dilate: int = DEFAULT_DILATE,
+                 device: str | None = None) -> None:
+        ultralytics = _require("ultralytics")
+        self.classes = tuple(classes) or DEFAULT_CLASSES
+        self.confidence = confidence
+        self.dilate = dilate
+        self.device = device
+        self.model = ultralytics.YOLOWorld(model)
+        self.model.set_classes(list(self.classes))
+
+    def detect(self, images: Sequence[Path]) -> list[FrameMasks]:
+        results = []
+        for image in images:
+            prediction = self.model.predict(
+                str(image), conf=self.confidence, device=self.device, verbose=False)[0]
+            height, width = prediction.orig_shape
+            names = prediction.names or {}
+            detections = [
+                Detection(
+                    label=names.get(int(box.cls), "object"),
+                    confidence=float(box.conf),
+                    box=tuple(float(v) for v in box.xyxy[0].tolist()),
+                    mask=None,  # detection only; SAM adds the outline when wrapped
+                )
+                for box in prediction.boxes
+            ]
+            results.append(FrameMasks(
+                path=Path(image), detections=detections,
+                mask=combine((height, width), detections, self.dilate)))
         return results
 
 
@@ -260,15 +307,28 @@ def make_backend(name: str, classes: Sequence[str] = DEFAULT_CLASSES,
                  dilate: int = DEFAULT_DILATE,
                  device: str | None = None,
                  yolo_model: str = "yolo11n-seg.pt",
+                 world_model: str = "yolov8s-worldv2.pt",
                  sam_model: str = "sam2.1_t.pt") -> Backend:
-    """Build a backend by name."""
+    """Build a backend by name.
+
+    The `-world` variants use open-vocabulary detection (any text class, including sky);
+    the SAM ones sharpen the detector's boxes into real outlines.
+    """
     if name == "yolo":
         return YoloBackend(yolo_model, classes, confidence, dilate, device)
     if name in {"sam2", "sam2.1"}:
         return Sam2Backend(
             YoloBackend(yolo_model, classes, confidence, 0, device),
             sam_model, dilate, device)
-    raise MaskError(f"unknown detection backend {name!r}; try 'yolo' or 'sam2.1'")
+    if name == "yolo-world":
+        return YoloWorldBackend(world_model, classes, confidence, dilate, device)
+    if name in {"sam-world", "sam2.1-world"}:
+        return Sam2Backend(
+            YoloWorldBackend(world_model, classes, confidence, 0, device),
+            sam_model, dilate, device)
+    raise MaskError(
+        f"unknown detection backend {name!r}; try 'yolo', 'sam2.1', "
+        f"'yolo-world', or 'sam-world'")
 
 
 def available() -> bool:

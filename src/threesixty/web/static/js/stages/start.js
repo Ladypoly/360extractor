@@ -119,7 +119,9 @@ export function StartStage(ctx) {
       .map(([value, label]) => el("option", { value }, label)));
   const maskSkyAngle = el("input", { type: "number", min: 0, max: 89, step: 1, value: 30 });
   const maskBackend = el("select", {},
-    ...[["sam2.1", "YOLO + SAM 2.1"], ["yolo", "YOLO only"]]
+    ...[["sam2.1", "YOLO + SAM 2.1 (COCO classes)"], ["yolo", "YOLO only (COCO classes)"],
+        ["sam-world", "YOLO-World + SAM (any class, incl. sky)"],
+        ["yolo-world", "YOLO-World (any class, incl. sky)"]]
       .map(([value, label]) => el("option", { value }, label)));
   const maskClasses = el("input", { type: "text",
                                     value: "person,car,bus,truck,motorcycle,bicycle" });
@@ -134,8 +136,9 @@ export function StartStage(ctx) {
       + "cone masks everything above the angle. Red on the panorama is what gets masked out."),
     field("objects", maskBackend), field("classes", maskClasses),
     el("div", { class: "pair" }, field("confidence", maskConfidence), field("grow", maskDilate)),
-    el("p", { class: "hint" }, "Object detection needs the ML extra. Preview runs it on the "
-      + "current frame (the first run downloads model weights)."),
+    el("p", { class: "hint" }, "COCO backends know a fixed set (person, car, …); for "
+      + "anything else — sky, trees, water — use a YOLO-World backend and add the words to "
+      + "classes. Preview runs it on the current frame (first run downloads weights)."),
     el("div", { class: "field", style: "margin-bottom:0" }, previewMaskBtn));
   for (const control of [maskBackend, maskClasses, maskConfidence, maskDilate]) {
     control.addEventListener("change", () => ctx.autosave());
