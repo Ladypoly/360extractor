@@ -10,7 +10,6 @@ import { Pipeline, STAGES } from "./pipeline.js";
 
 import { StartStage } from "./stages/start.js";
 import { CaptureStage } from "./stages/capture.js";
-import { RefineStage } from "./stages/refine.js";
 import { ReconstructStage } from "./stages/reconstruct.js";
 import { TrainStage } from "./stages/train.js";
 import { InspectStage } from "./stages/inspect.js";
@@ -286,7 +285,6 @@ async function boot() {
 
   stages.start = StartStage(context);
   stages.capture = CaptureStage(context);
-  stages.refine = RefineStage(context);
   stages.reconstruct = ReconstructStage(context);
   stages.train = TrainStage(context);
   stages.inspect = InspectStage(context);

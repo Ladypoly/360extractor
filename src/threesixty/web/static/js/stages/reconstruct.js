@@ -57,14 +57,7 @@ export function ReconstructStage(ctx) {
       el("button", { class: "btn btn--ghost", type: "button", onclick: writeScript },
          "Generate script")));
 
-  const about = InspectorSection("Why this works", { id: "rec-about", open: false });
-  about.body.append(el("p", { class: "hint" },
-    "These cameras are synthetic, so their relative poses and intrinsics are known "
-    + "exactly rather than estimated. COLMAP is given those and told to keep them, so it "
-    + "only has to solve the rig trajectory — which is what stops panoramic tile sets "
-    + "drifting."));
-
-  inspector.append(pipeline.section, options.section, about.section);
+  inspector.append(pipeline.section, options.section);
 
   const actionBar = StageActionBar({
     primaryLabel: "Run All",

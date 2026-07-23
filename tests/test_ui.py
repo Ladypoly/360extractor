@@ -22,7 +22,7 @@ pytestmark = [pytest.mark.ffmpeg, pytest.mark.ui]
 sync_playwright = pytest.importorskip(
     "playwright.sync_api", reason="playwright is not installed").sync_playwright
 
-STAGES = ["start", "capture", "refine", "reconstruct", "train", "inspect"]
+STAGES = ["start", "capture", "reconstruct", "train", "inspect"]
 
 
 def free_port():
@@ -197,16 +197,16 @@ class TestAutosaveOwnership:
 
 class TestStageOwnership:
     def test_extract_belongs_only_to_capture(self, page):
-        """The reported complaint: an Extract button while working in Refine."""
+        """The reported complaint: an Extract button on the wrong stage."""
         capture = page.locator("#stage-panel-capture .actionbar")
         assert "Extract frames" in capture.inner_text()
 
-        for key in ["refine", "reconstruct", "train", "inspect"]:
+        for key in ["reconstruct", "train", "inspect"]:
             text = page.locator(f"#stage-panel-{key} .actionbar").inner_text()
             assert "Extract" not in text, f"{key} offers an Extract action"
 
     @pytest.mark.parametrize("key,label", [
-        ("capture", "Extract frames"), ("refine", "Run Detection"),
+        ("capture", "Extract frames"),
         ("reconstruct", "Run All"), ("train", "Start Training"),
         ("inspect", "Apply Cleanup"),
     ])

@@ -10,7 +10,6 @@ import { icon } from "./icons.js";
 export const STAGES = [
   { key: "start",       label: "Start",       iconName: "folder" },
   { key: "capture",     label: "Capture",     iconName: "camera" },
-  { key: "refine",      label: "Refine",      iconName: "refine" },
   { key: "reconstruct", label: "Reconstruct", iconName: "reconstruct" },
   { key: "train",       label: "Train",       iconName: "train" },
   { key: "inspect",     label: "Inspect",     iconName: "inspect" },
@@ -99,6 +98,6 @@ export function Pipeline({ onSelect }) {
 
 /** Pipeline stages and project stages are not quite the same set. */
 function stageToProject(key) {
-  return { capture: "extract", refine: "mask", reconstruct: "export",
+  return { capture: "extract", reconstruct: "export",
            train: "train", inspect: "clean" }[key] || key;
 }

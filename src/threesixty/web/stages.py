@@ -74,7 +74,7 @@ def readiness(project: Project | None) -> dict[str, dict]:
     if project is None:
         blocked = {"ready": False, "reason": "Open or create a project first."}
         states = {stage: dict(blocked) for stage in
-                  ("capture", "refine", "reconstruct", "train", "inspect")}
+                  ("capture", "reconstruct", "train", "inspect")}
         states["start"] = {"ready": True, "reason": ""}   # the entry point is always open
         return states
 
@@ -90,10 +90,6 @@ def readiness(project: Project | None) -> dict[str, dict]:
         "capture": {
             "ready": bool(project.sources),
             "reason": "" if project.sources else "Load a 360 video or still first.",
-        },
-        "refine": {
-            "ready": has_images,
-            "reason": "" if has_images else "Extract images before masking can begin.",
         },
         "reconstruct": {
             "ready": has_images,
