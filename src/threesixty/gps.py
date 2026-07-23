@@ -43,6 +43,39 @@ class Fix:
     time: float | None = None  # seconds since epoch
 
 
+# -- distance ---------------------------------------------------------------
+#
+# GPX carries no traveled-distance, only positions, so the arc length along a track is
+# ours to compute. Haversine (great-circle) is accurate to well under a metre at street
+# scale and needs no projection or datum choice -- fine for deciding where to cut a
+# 500 m segment.
+
+EARTH_RADIUS_M = 6_371_000.0
+
+
+def haversine(a: Fix, b: Fix) -> float:
+    """Great-circle distance between two fixes, in metres. Ignores altitude."""
+    from math import asin, cos, radians, sin, sqrt
+
+    lat1, lat2 = radians(a.latitude), radians(b.latitude)
+    dlat = lat2 - lat1
+    dlon = radians(b.longitude - a.longitude)
+    h = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
+    return 2 * EARTH_RADIUS_M * asin(min(1.0, sqrt(h)))
+
+
+def cumulative_distance(fixes: list[Fix]) -> list[float]:
+    """Distance travelled along the track up to each fix, in metres.
+
+    `result[0] == 0`; `result[i]` is the summed haversine hops from the first fix to the
+    i-th. One value per fix, so it lines up index-for-index with `fixes`.
+    """
+    totals = [0.0]
+    for previous, current in zip(fixes, fixes[1:]):
+        totals.append(totals[-1] + haversine(previous, current))
+    return totals
+
+
 # -- GPX --------------------------------------------------------------------
 
 
