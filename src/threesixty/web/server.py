@@ -740,15 +740,15 @@ class Handler(BaseHTTPRequestHandler):
         return {"path": str(target)}
 
     def api_mask_preview(self, payload: dict) -> dict:
-        """The equirect mask tinted red over the panorama, so masking can be eyeballed.
+        """The mask tinted red over the panorama at one frame, so masking can be checked.
 
-        Deterministic (sky cone + any static occluders), so it is the same on every
-        frame -- a single preview stands in for what the whole import will mask, and the
-        user can adjust or cancel before paying for it.
+        The sky cone and static occluders are deterministic (same on every frame). With
+        ``objects: true`` it also runs detection on this frame -- more expensive, so it
+        is on-demand behind the Preview button rather than every scrub.
         """
         info = probe_media(payload["path"], self.session.ffmpeg)
         time = float(payload.get("time", 0.0))
-        width = int(payload.get("width", 720))
+        width = int(payload.get("width", 1280))
         height = width // 2
         ffmpeg = self.session.ffmpeg
 
@@ -762,17 +762,10 @@ class Handler(BaseHTTPRequestHandler):
         if result.returncode != 0 or not frame.exists():
             raise FFmpegError(f"preview failed: {result.stderr.strip()}")
 
-        raw = list(payload.get("occluders") or [])
-        angle = payload.get("sky_cone_angle")
-        if angle:
-            raw.append({"type": "zenith_cone", "angle": float(angle)})
-        occluders = [o for o in (geometric.Occluder.from_dict(d) for d in raw)
-                     if o.kind != "ml"]
-        if not occluders:
+        mask = self._preview_mask(frame, width, height, payload)
+        if mask is None:
             return {"url": f"/preview/{frame.name}", "empty": True}
 
-        equirect = geometric.build_equirect_mask(
-            ffmpeg, occluders, width, height, self.session.cache / "mask_preview_eq.png")
         target = self.session.next_name(".jpg")
         opacity = float(payload.get("opacity", 0.5))
         # Invert the mask so the ignored (black) region is what gets tinted red.
@@ -784,13 +777,61 @@ class Handler(BaseHTTPRequestHandler):
             "[img][tint]overlay[out]"
         )
         composite = [str(ffmpeg.path), "-hide_banner", "-loglevel", "error", "-y",
-                     "-i", str(frame), "-i", str(equirect),
+                     "-i", str(frame), "-i", str(mask),
                      "-filter_complex", graph, "-map", "[out]",
                      "-frames:v", "1", "-q:v", "4", str(target)]
         result = subprocess.run(composite, capture_output=True, text=True, errors="replace")
         if result.returncode != 0 or not target.exists():
             raise FFmpegError(f"mask preview failed: {result.stderr.strip()}")
-        return {"url": f"/preview/{target.name}"}
+        return {"url": f"/preview/{target.name}", "objects": bool(payload.get("objects"))}
+
+    def _preview_mask(self, frame: Path, width: int, height: int,
+                      payload: dict) -> Path | None:
+        """Build the combined equirect mask (cone/occluders + optional detection) as PNG.
+
+        Returns None when nothing would be masked, so the caller shows the plain frame.
+        """
+        raw = list(payload.get("occluders") or [])
+        angle = payload.get("sky_cone_angle")
+        if angle:
+            raw.append({"type": "zenith_cone", "angle": float(angle)})
+        occluders = [o for o in (geometric.Occluder.from_dict(d) for d in raw)
+                     if o.kind != "ml"]
+
+        cone_path = None
+        if occluders:
+            cone_path = geometric.build_equirect_mask(
+                self.session.ffmpeg, occluders, width, height,
+                self.session.cache / "mask_preview_eq.png")
+
+        want_objects = bool(payload.get("objects"))
+        if not want_objects:
+            return cone_path
+
+        from ..mask import ml
+        if not ml.available():
+            raise ValueError('object detection needs the ML extra: pip install -e ".[ml]"')
+        import numpy as np
+
+        detect = payload.get("detect") or {}
+        backend = ml.make_backend(
+            detect.get("backend", "sam2.1"),
+            classes=detect.get("classes") or list(DetectSettings().classes),
+            confidence=float(detect.get("confidence", 0.25)),
+            dilate=int(detect.get("dilate", 6)))
+        objects = backend.detect([frame])[0].mask     # HxW uint8, white keeps
+        combined = np.asarray(objects)
+        if cone_path is not None:
+            import cv2
+            cone = cv2.imread(str(cone_path), cv2.IMREAD_GRAYSCALE)
+            if cone.shape != combined.shape:
+                cone = cv2.resize(cone, (combined.shape[1], combined.shape[0]))
+            combined = np.minimum(combined, cone)     # stricter of the two wins
+
+        import cv2
+        out = self.session.cache / "mask_preview_combined.png"
+        cv2.imwrite(str(out), combined)
+        return out
 
     def api_mask_coverage(self, payload: dict) -> dict:
         """Measure what each camera actually loses to the occluders.

@@ -125,6 +125,8 @@ export function StartStage(ctx) {
                                     value: "person,car,bus,truck,motorcycle,bicycle" });
   const maskConfidence = el("input", { type: "number", min: 0.05, max: 0.95, step: 0.05, value: 0.25 });
   const maskDilate = el("input", { type: "number", min: 0, max: 40, step: 1, value: 6 });
+  const previewMaskBtn = el("button", { class: "btn", type: "button", onclick: runMaskPreview,
+    html: `${icon("inspect", { size: 14 })}<span>Preview masking</span>` });
   masking.body.append(
     el("div", { class: "field" }, el("label", {}, "exclude sky"), maskSky),
     field("sky via", maskSkyMethod), field("cone °", maskSkyAngle),
@@ -132,8 +134,9 @@ export function StartStage(ctx) {
       + "cone masks everything above the angle. Red on the panorama is what gets masked out."),
     field("objects", maskBackend), field("classes", maskClasses),
     el("div", { class: "pair" }, field("confidence", maskConfidence), field("grow", maskDilate)),
-    el("p", { class: "hint" }, "Object detection needs the ML extra and runs when cameras "
-      + "are generated."));
+    el("p", { class: "hint" }, "Object detection needs the ML extra. Preview runs it on the "
+      + "current frame (the first run downloads model weights)."),
+    el("div", { class: "field", style: "margin-bottom:0" }, previewMaskBtn));
   for (const control of [maskBackend, maskClasses, maskConfidence, maskDilate]) {
     control.addEventListener("change", () => ctx.autosave());
   }
@@ -366,6 +369,26 @@ export function StartStage(ctx) {
         previewImg.src = url;
       } catch { /* keep the frame that is showing */ }
     }, 250);
+  }
+
+  // Run the full masking (sky + object detection) on the current frame, on demand.
+  async function runMaskPreview() {
+    if (!local.media) { ctx.flash("Load a source first.", { level: "warn" }); return; }
+    const skyOn = maskSky.checked && maskSkyMethod.value !== "off";
+    previewMaskBtn.disabled = true;
+    previewMaskBtn.querySelector("span").textContent = "Running…";
+    try {
+      const { url } = await ctx.api.post("/api/mask/preview", {
+        path: local.media.path, time: parseFloat(previewTime.value) || 0,
+        objects: true, detect: readMasking(),
+        sky_cone_angle: skyOn ? (parseFloat(maskSkyAngle.value) || 30) : null,
+      });
+      previewImg.src = url;
+    } catch (error) { ctx.report(error); }
+    finally {
+      previewMaskBtn.disabled = false;
+      previewMaskBtn.querySelector("span").textContent = "Preview masking";
+    }
   }
 
   updateSegFields();
