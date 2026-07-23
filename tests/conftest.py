@@ -5,6 +5,12 @@ import pytest
 from threesixty.ffmpeg import FFmpegError, resolve_ffmpeg
 
 
+@pytest.fixture(autouse=True)
+def isolate_state(tmp_path, monkeypatch):
+    """Keep the recent-projects list out of the developer's real home directory."""
+    monkeypatch.setenv("THREESIXTY_STATE_DIR", str(tmp_path / "state"))
+
+
 @pytest.fixture(scope="session")
 def ffmpeg():
     """The ffmpeg 360extract would use, or skip the test."""
