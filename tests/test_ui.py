@@ -284,16 +284,15 @@ class TestReconstructWorkspace:
 class TestJobsAcrossStages:
     def test_a_running_job_shows_in_the_pipeline_from_another_stage(self, page):
         """Leaving a stage must not hide, or stop, its work."""
-        page.click("#stage-tab-capture")
-        page.wait_for_timeout(300)
-        # The primary opens the extract-frames dialog; confirm it to start the job.
-        page.click("#stage-panel-capture .actionbar .btn--primary")
-        page.wait_for_selector("#frames-dialog[open]")
-        page.click("#frames-dialog .btn--primary")
+        # Start a capture job (frame extraction, a Start-tab action) via the API.
+        page.evaluate("""async () => {
+            await fetch('/api/frames/extract', {method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({mode: 'fps', value: 1})});
+        }""")
 
         # Move away immediately; the pipeline must still report it. Reconstruct is
-        # legitimately disabled here (frame extraction hasn't produced camera images
-        # yet, that is the second capture step), so navigate through the app's handler.
+        # legitimately disabled here (no camera images yet), so navigate via the handler.
         page.evaluate(
             "{ const b = document.querySelector('#stage-tab-reconstruct');"
             "  b.disabled = false; b.click(); }")

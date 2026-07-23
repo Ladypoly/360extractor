@@ -131,22 +131,13 @@ export function CaptureStage(ctx) {
     el("p", { class: "hint" },
       "Painted once on the panorama: the rig is rigid, so one region covers every frame."));
 
-  const output = InspectorSection("Output", { id: "cap-output" });
-  const outDir = el("input", { type: "text", readonly: true, tabindex: -1,
-                               placeholder: "a folder is created beside the source" });
-  const outFormat = el("select", {}, el("option", {}, "jpg"), el("option", {}, "png"));
-  const outQuality = el("input", { type: "number", value: 2, min: 1, max: 31 });
+  // Frame selection lives on the Start tab now; these elements back the legacy dialog.
   const frameMode = el("select", {},
     ...[["sharp", "sharpest per second"], ["fps", "every N per second"],
         ["every", "every Nth frame"], ["all", "all frames"]]
       .map(([value, label]) => el("option", { value }, label)));
   const frameValue = el("input", { type: "number", value: 2, step: 0.5, min: 0.1 });
   const estimate = el("p", { class: "hint" });
-  output.body.append(
-    field("folder", outDir),
-    el("p", { class: "hint" }, "Created automatically beside the source; everything the "
-      + "project produces lands here and saves as you go."),
-    el("div", { class: "pair" }, field("format", outFormat), field("quality", outQuality)));
 
   const orientation = InspectorSection("Rig orientation", { id: "cap-orient", open: false });
   const orientYaw = el("input", { type: "number", value: 0, step: 1 });
@@ -164,7 +155,7 @@ export function CaptureStage(ctx) {
   // objects stay constructed (referenced by legacy handlers with harmless defaults) but
   // are never shown.
   // Source is chosen on the Start tab now; Capture works on the extracted frames.
-  for (const part of [rigSection, image, output, previewSection]) {
+  for (const part of [rigSection, image, previewSection]) {
     inspector.append(part.section);
   }
 
@@ -893,8 +884,7 @@ export function CaptureStage(ctx) {
   function readSettings() {
     if (!local.rig) return;
     local.rig.grade = readGrade();
-    local.rig.output.format = outFormat.value;
-    local.rig.output.quality = parseInt(outQuality.value, 10) || 2;
+    // format/quality keep the preset defaults now that the Output section is gone.
     local.rig.output.auto = true;
     local.rig.orientation.yaw = parseFloat(orientYaw.value) || 0;
     local.rig.orientation.pitch = parseFloat(orientPitch.value) || 0;
@@ -936,10 +926,11 @@ export function CaptureStage(ctx) {
   // working set, then -- once they exist -- project them through the rig into camera
   // tiles. The primary action label follows which step is next.
   async function runCapture() {
-    if (!local.media) { ctx.flash("Load a source first.", { level: "warn" }); return; }
+    if (!local.frames.length) {
+      ctx.flash("Extract frames on the Start tab first.", { level: "warn" }); return;
+    }
     readSettings();
-    if (!local.frames.length) return openFramesDialog();
-    return generateCameras();
+    return generateCameras();   // works from the extracted frames; no source needed here
   }
 
   async function extractFrames() {
@@ -1000,7 +991,7 @@ export function CaptureStage(ctx) {
   camFov.addEventListener("input", applyGlobalFovShape);
   camFov.addEventListener("change", previewCamera);
   camShape.addEventListener("change", () => { applyGlobalFovShape(); previewCamera(); });
-  for (const control of [outFormat, outQuality, orientYaw, orientPitch, frameValue]) {
+  for (const control of [orientYaw, orientPitch, frameValue]) {
     control.addEventListener("change", () => refresh());
   }
   frameMode.addEventListener("change", () => {
@@ -1016,8 +1007,6 @@ export function CaptureStage(ctx) {
     try {
       await loadPresets("ring");
       local.rig = structuredClone(local.presets.ring);
-      outFormat.value = local.rig.output.format;
-      outQuality.value = local.rig.output.quality;
       writeGrade(local.rig.grade);
       syncRigControls();
       refresh(false);
@@ -1041,15 +1030,12 @@ export function CaptureStage(ctx) {
       if (!project) return;
       local.rig = project.rig;
       local.selected = 0;
-      outFormat.value = local.rig.output.format;
-      outQuality.value = local.rig.output.quality;
       orientYaw.value = local.rig.orientation.yaw;
       orientPitch.value = local.rig.orientation.pitch;
       writeGrade(local.rig.grade);
       frameMode.value = project.frames.mode;
       frameValue.value = project.frames.value;
       maskMode.value = project.output.mask_mode;
-      outDir.value = project.root;
 
       const cone = (local.rig.occluders || []).find((o) => o.type === "nadir_cone");
       local.nadir = cone ? cone.angle : 0;
