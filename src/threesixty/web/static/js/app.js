@@ -8,6 +8,7 @@ import { EmptyState, el, StatusBadge } from "./components.js";
 import { icon } from "./icons.js";
 import { Pipeline, STAGES } from "./pipeline.js";
 
+import { StartStage } from "./stages/start.js";
 import { CaptureStage } from "./stages/capture.js";
 import { RefineStage } from "./stages/refine.js";
 import { ReconstructStage } from "./stages/reconstruct.js";
@@ -22,7 +23,7 @@ export const state = {
   media: null,
   jobs: {},
   readiness: {},
-  active: localStorage.getItem("stage") || "capture",
+  active: localStorage.getItem("stage") || "start",
 };
 
 const stages = {};
@@ -154,7 +155,9 @@ function hideRecent(menu) {
 export function applyProject(project, { keepMedia = false } = {}) {
   state.project = project;
   topbar.setProject(project);
-  if (stages.capture) stages.capture.applyProject(project, { keepMedia });
+  for (const stage of Object.values(stages)) {
+    if (stage.applyProject) stage.applyProject(project, { keepMedia });
+  }
   refreshJobs();
 }
 
@@ -265,6 +268,7 @@ async function boot() {
     applyProject, autosave, openProject, openRecent,
   };
 
+  stages.start = StartStage(context);
   stages.capture = CaptureStage(context);
   stages.refine = RefineStage(context);
   stages.reconstruct = ReconstructStage(context);
@@ -286,11 +290,10 @@ async function boot() {
   try {
     const { project } = await api.get("/api/project");
     if (project) applyProject(project);
-    // With nothing open, the last-used stage is meaningless -- and landing on, say,
-    // Reconstruct shows an empty panel with no way in. Start at Capture, which owns the
-    // "load a video or open a project" entry point.
-    else state.active = "capture";
-  } catch { state.active = "capture"; }
+    // With nothing open, the last-used stage is meaningless. Start at the Start tab,
+    // which owns project selection and import.
+    else state.active = "start";
+  } catch { state.active = "start"; }
 
   goTo(state.active);
   refreshJobs();

@@ -414,6 +414,18 @@ dialog::backdrop { background: rgba(0, 0, 0, .55); }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
+/* ── start tab ───────────────────────────────────────────────────────── */
+
+.start__workspace {
+  grid-area: work;
+  background: var(--workspace-bg);
+  display: flex; gap: var(--s8); align-items: flex-start; justify-content: center;
+  padding: var(--s8); overflow-y: auto;
+}
+@media (max-width: 900px) {
+  .start__workspace { flex-direction: column; align-items: center; }
+}
+
 /* ── capture landing (empty state) ───────────────────────────────────── */
 
 .landing { display: none; }

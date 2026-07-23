@@ -8,6 +8,7 @@ import { el } from "./components.js";
 import { icon } from "./icons.js";
 
 export const STAGES = [
+  { key: "start",       label: "Start",       iconName: "folder" },
   { key: "capture",     label: "Capture",     iconName: "camera" },
   { key: "refine",      label: "Refine",      iconName: "refine" },
   { key: "reconstruct", label: "Reconstruct", iconName: "reconstruct" },

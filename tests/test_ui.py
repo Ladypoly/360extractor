@@ -22,7 +22,7 @@ pytestmark = [pytest.mark.ffmpeg, pytest.mark.ui]
 sync_playwright = pytest.importorskip(
     "playwright.sync_api", reason="playwright is not installed").sync_playwright
 
-STAGES = ["capture", "refine", "reconstruct", "train", "inspect"]
+STAGES = ["start", "capture", "refine", "reconstruct", "train", "inspect"]
 
 
 def free_port():
@@ -136,7 +136,7 @@ class TestShell:
         assert page.title() == "360extract"
         assert page.problems == []
 
-    def test_the_pipeline_has_five_stages_in_order(self, page):
+    def test_the_pipeline_has_the_stages_in_order(self, page):
         labels = [page.locator(f"#stage-tab-{key} .stage__label").inner_text()
                   for key in STAGES]
         for label, key in zip(labels, STAGES):
@@ -153,16 +153,14 @@ class TestShell:
 
 
 class TestLanding:
-    def test_with_no_project_it_lands_on_capture_showing_the_front_door(
-            self, browser, empty_app):
+    def test_with_no_project_it_lands_on_start(self, browser, empty_app):
         page = open_page(browser, empty_app)
         try:
-            # Capture is the visible panel, not whatever stage was last used.
-            assert page.locator("#stage-panel-capture").is_visible()
-            assert page.locator("#stage-tab-capture").get_attribute("aria-selected") == "true"
-            # The landing (drop zone + Browse + Open project) is shown; the editor is not.
-            assert page.locator(".stage-panel--empty .landing__drop").is_visible()
-            assert page.locator("#stage-panel-capture .inspector").is_hidden()
+            # Start is the entry point, not whatever stage was last used.
+            assert page.locator("#stage-panel-start").is_visible()
+            assert page.locator("#stage-tab-start").get_attribute("aria-selected") == "true"
+            # Its drop zone / project hub is shown.
+            assert page.locator("#stage-panel-start .landing__drop").is_visible()
             assert page.problems == []
         finally:
             page.close()
@@ -175,7 +173,7 @@ class TestLanding:
             page.reload(wait_until="networkidle")
             page.wait_for_selector(".pipeline .stage")
             page.wait_for_timeout(300)
-            assert page.locator("#stage-panel-capture").is_visible()
+            assert page.locator("#stage-panel-start").is_visible()
             assert page.locator("#stage-panel-reconstruct").is_hidden()
         finally:
             page.close()

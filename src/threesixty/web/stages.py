@@ -73,8 +73,10 @@ def readiness(project: Project | None) -> dict[str, dict]:
     """
     if project is None:
         blocked = {"ready": False, "reason": "Open or create a project first."}
-        return {stage: dict(blocked) for stage in
-                ("capture", "refine", "reconstruct", "train", "inspect")}
+        states = {stage: dict(blocked) for stage in
+                  ("capture", "refine", "reconstruct", "train", "inspect")}
+        states["start"] = {"ready": True, "reason": ""}   # the entry point is always open
+        return states
 
     images_root = project.root / "images"
     has_images = images_root.exists() and any(
@@ -84,6 +86,7 @@ def readiness(project: Project | None) -> dict[str, dict]:
     splats = trained_splats(project)
 
     return {
+        "start": {"ready": True, "reason": ""},
         "capture": {
             "ready": bool(project.sources),
             "reason": "" if project.sources else "Load a 360 video or still first.",
