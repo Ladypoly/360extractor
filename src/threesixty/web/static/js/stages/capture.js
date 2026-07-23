@@ -107,6 +107,38 @@ export function CaptureStage(ctx) {
       el("button", { class: "btn btn--ghost", type: "button", onclick: resetGrade }, "Reset")),
     gradeNotes);
 
+  // Masking: what to keep out of the splat. Runs when cameras are generated -- sky (a
+  // cone for now, a semantic model later) plus object detection on the frames.
+  const masking = InspectorSection("Masking", { id: "cap-masking" });
+  const maskSky = el("input", { type: "checkbox", checked: true });
+  const maskSkyMethod = el("select", {},
+    ...[["auto", "auto (model or cone)"], ["cone", "cone only"], ["off", "off"]]
+      .map(([value, label]) => el("option", { value }, label)));
+  const maskSkyAngle = el("input", { type: "number", min: 0, max: 89, step: 1, value: 30 });
+  const maskBackend = el("select", {},
+    ...[["sam2.1", "YOLO + SAM 2.1"], ["yolo", "YOLO only"]]
+      .map(([value, label]) => el("option", { value }, label)));
+  const maskClasses = el("input", { type: "text",
+                                    value: "person,car,bus,truck,motorcycle,bicycle" });
+  const maskConfidence = el("input", { type: "number", min: 0.05, max: 0.95, step: 0.05, value: 0.25 });
+  const maskDilate = el("input", { type: "number", min: 0, max: 40, step: 1, value: 6 });
+  masking.body.append(
+    el("div", { class: "field" }, el("label", {}, "exclude sky"), maskSky),
+    field("sky via", maskSkyMethod),
+    field("cone °", maskSkyAngle),
+    el("p", { class: "hint" }, "Sky only ever seeds floaters, so it is masked by default; "
+      + "the cone masks everything above the angle."),
+    field("objects", maskBackend),
+    field("classes", maskClasses),
+    el("div", { class: "pair" }, field("confidence", maskConfidence), field("grow", maskDilate)),
+    el("p", { class: "hint" }, "Object detection needs the ML extra and runs on the frames "
+      + "when cameras are generated."));
+  for (const control of [maskSkyMethod, maskSkyAngle, maskBackend, maskClasses,
+                         maskConfidence, maskDilate]) {
+    control.addEventListener("change", () => refresh());
+  }
+  maskSky.addEventListener("change", () => { updateMaskFields(); refresh(); });
+
   const occluder = InspectorSection("Occluder", { id: "cap-occluder", note: "no cone" });
   const nadirSlider = el("input", { type: "range", min: 0, max: 89, step: 1, value: 0 });
   const brushSlider = slider(4, 160, 2, 40);
@@ -193,7 +225,7 @@ export function CaptureStage(ctx) {
   // lives in its own flow and every camera shares one global FOV/shape. Their element
   // objects stay constructed (referenced by legacy handlers with harmless defaults) but
   // are never shown.
-  for (const part of [source, rigSection, image, output,
+  for (const part of [source, rigSection, image, masking, output,
                       segments, previewSection]) {
     inspector.append(part.section);
   }
@@ -549,6 +581,38 @@ export function CaptureStage(ctx) {
       if (delta < diff) { diff = delta; best = option.value; }
     }
     camShape.value = best;
+  }
+
+  // ── masking ──────────────────────────────────────────────────────────
+
+  function updateMaskFields() {
+    const on = maskSky.checked;
+    maskSkyMethod.parentElement.hidden = !on;
+    maskSkyAngle.parentElement.hidden = !on || maskSkyMethod.value === "off";
+  }
+
+  function readMasking() {
+    return {
+      exclude_sky: maskSky.checked,
+      sky_method: maskSkyMethod.value,
+      sky_cone_angle: parseFloat(maskSkyAngle.value) || 30,
+      backend: maskBackend.value,
+      classes: maskClasses.value.split(",").map((s) => s.trim()).filter(Boolean),
+      confidence: parseFloat(maskConfidence.value) || 0.25,
+      dilate: parseInt(maskDilate.value, 10) || 0,
+    };
+  }
+
+  function writeMasking(detect) {
+    if (!detect) return;
+    maskSky.checked = detect.exclude_sky !== false;
+    maskSkyMethod.value = detect.sky_method || "auto";
+    maskSkyAngle.value = detect.sky_cone_angle != null ? detect.sky_cone_angle : 30;
+    maskBackend.value = detect.backend || "sam2.1";
+    maskClasses.value = (detect.classes || []).join(",");
+    maskConfidence.value = detect.confidence != null ? detect.confidence : 0.25;
+    maskDilate.value = detect.dilate != null ? detect.dilate : 6;
+    updateMaskFields();
   }
 
   function applyGlobalFovShape() {
@@ -1073,6 +1137,7 @@ export function CaptureStage(ctx) {
       fitCanvas();
       updateLanding();
       updateSegFields();
+      updateMaskFields();
     } catch (error) { ctx.report(error); }
   })();
 
@@ -1099,6 +1164,7 @@ export function CaptureStage(ctx) {
       frameMode.value = project.frames.mode;
       frameValue.value = project.frames.value;
       maskMode.value = project.output.mask_mode;
+      writeMasking(project.detect);
       outDir.value = project.root;
 
       const cone = (local.rig.occluders || []).find((o) => o.type === "nadir_cone");
@@ -1120,6 +1186,7 @@ export function CaptureStage(ctx) {
         sources: local.media ? [local.media.path] : [],
         frames: { mode: frameMode.value, value: parseFloat(frameValue.value) || 2 },
         output: { mask_mode: maskMode.value },
+        detect: readMasking(),
       };
     },
   };
