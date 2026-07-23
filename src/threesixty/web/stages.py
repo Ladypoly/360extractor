@@ -144,7 +144,7 @@ def reconstruction_steps(project: Project, colmap: Path, clip: str,
               "--Mapper.ba_refine_sensor_from_rig", "0",
               # Snapshots let the point cloud be shown as it is built, not only at the end.
               "--Mapper.snapshot_path", str(root / "sparse" / "snapshots"),
-              "--Mapper.snapshot_images_freq", "20"],
+              "--Mapper.snapshot_frames_freq", "20"],
              COLMAP_REGISTERING),
     ]
 
@@ -230,6 +230,7 @@ def run_reconstruction(job: Job, project: Project, settings: dict) -> dict:
         job.update(result={"steps": states})
 
     (project.root / "sparse").mkdir(parents=True, exist_ok=True)
+    (project.root / "sparse" / "snapshots").mkdir(parents=True, exist_ok=True)
     records = run_steps(job, steps, on_step=note)
 
     metrics = reconstruction_metrics(project)
