@@ -302,6 +302,51 @@ class TestTwoStageCapture:
         assert "extract frames" in body["error"]
 
 
+class TestReconstructPoints:
+    def _write_points(self, model_dir):
+        import struct as st
+        model_dir.mkdir(parents=True, exist_ok=True)
+        with open(model_dir / "points3D.bin", "wb") as handle:
+            pts = [(1.0, 2.0, 3.0, 255, 0, 0), (4.0, 5.0, 6.0, 0, 255, 0)]
+            handle.write(st.pack("<Q", len(pts)))
+            for i, (x, y, z, r, g, b) in enumerate(pts):
+                handle.write(st.pack("<Q", i + 1))
+                handle.write(st.pack("<ddd", x, y, z))
+                handle.write(st.pack("<BBB", r, g, b))
+                handle.write(st.pack("<d", 0.1))
+                handle.write(st.pack("<Q", 1))
+                handle.write(st.pack("<ii", 1, 0))
+
+    def test_serves_the_sparse_cloud_as_binary(self, make_ui, tmp_path):
+        import struct as st
+        project = Project.create(tmp_path / "proj")
+        self._write_points(project.root / "sparse" / "0")
+        base, _ = make_ui(project)
+
+        with urllib.request.urlopen(base + "/api/reconstruct/points", timeout=30) as r:
+            blob = r.read()
+        mtime, count = st.unpack_from("<dI", blob, 0)
+        assert count == 2 and mtime > 0
+        assert st.unpack_from("<3f", blob, 12) == (1.0, 2.0, 3.0)      # first xyz
+
+    def test_204_when_the_model_has_not_changed(self, make_ui, tmp_path):
+        import struct as st
+        project = Project.create(tmp_path / "proj")
+        self._write_points(project.root / "sparse" / "0")
+        base, _ = make_ui(project)
+        with urllib.request.urlopen(base + "/api/reconstruct/points", timeout=30) as r:
+            mtime = st.unpack_from("<dI", r.read(), 0)[0]
+        with urllib.request.urlopen(
+                f"{base}/api/reconstruct/points?since={mtime}", timeout=30) as r:
+            assert r.status == 204
+
+    def test_no_model_is_204(self, make_ui, tmp_path):
+        project = Project.create(tmp_path / "proj")
+        base, _ = make_ui(project)
+        with urllib.request.urlopen(base + "/api/reconstruct/points", timeout=30) as r:
+            assert r.status == 204
+
+
 class TestMaskPreview:
     def test_returns_a_tinted_preview_for_the_sky_cone(self, make_ui, tmp_path,
                                                        equirect_clip):

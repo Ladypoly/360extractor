@@ -421,6 +421,23 @@ dialog::backdrop { background: rgba(0, 0, 0, .55); }
 .overlay-toggle.is-busy { color: var(--accent); }
 .overlay-toggle.is-busy::after { content: " …"; }
 
+/* ── reconstruction point cloud ──────────────────────────────────────── */
+
+.pointcloud__host {
+  flex: 1; min-height: 0; position: relative;
+  background: var(--workspace-bg);
+  border-bottom: 1px solid var(--border);
+}
+.pointcloud { width: 100%; height: 100%; display: block; cursor: grab; }
+.pointcloud:active { cursor: grabbing; }
+.pointcloud__info {
+  position: absolute; top: var(--s3); left: var(--s3);
+  padding: 2px var(--s2); border-radius: var(--radius-control);
+  background: rgba(0, 0, 0, 0.45); color: var(--text-dim); font-size: var(--fs-meta);
+  pointer-events: none;
+}
+.log--compact { flex: 0 0 auto; max-height: 168px; }
+
 /* ── start tab ───────────────────────────────────────────────────────── */
 
 .start__main { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: center; }

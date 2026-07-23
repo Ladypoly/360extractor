@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import json
+import struct
 import subprocess
 import tempfile
 import threading
@@ -259,6 +260,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"recent": recent.entries()})
             elif route.path == "/api/frames/list":
                 self._json(self.api_frames_list())
+            elif route.path == "/api/reconstruct/points":
+                self._serve_reconstruct_points(query)
             elif route.path.startswith("/preview/"):
                 name = Path(route.path).name
                 self._file(self.session.cache / name, "image/jpeg")
@@ -1094,6 +1097,50 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError(f"{name!r} is a built-in preset and cannot be deleted")
         userpresets.delete(name)
         return self._presets_payload()
+
+    def _model_mtime(self, directory: Path) -> float:
+        best = 0.0
+        for name in ("points3D.bin", "points3D.txt"):
+            candidate = directory / name
+            if candidate.exists():
+                best = max(best, candidate.stat().st_mtime)
+        return best
+
+    def _latest_sparse(self, project: Project) -> Path | None:
+        """The most recently written model with points -- a snapshot mid-run, or the
+        final sparse/0 -- so the view follows the reconstruction as it builds."""
+        sparse = project.root / "sparse"
+        candidates = [sparse / "0", sparse / "aligned"]
+        snapshots = sparse / "snapshots"
+        if snapshots.exists():
+            candidates += [d for d in snapshots.iterdir() if d.is_dir()]
+        withpoints = [d for d in candidates if self._model_mtime(d) > 0]
+        return max(withpoints, key=self._model_mtime) if withpoints else None
+
+    def _serve_reconstruct_points(self, query: dict) -> None:
+        """The current sparse cloud as a compact binary: mtime, count, xyz, rgb.
+
+        `?since=<mtime>` gets a 204 when the model has not changed, so polling during a
+        run is cheap.
+        """
+        project = self.session.project
+        model_dir = self._latest_sparse(project) if project else None
+        mtime = self._model_mtime(model_dir) if model_dir else 0.0
+        since = float(query.get("since", ["0"])[0] or 0)
+        if model_dir is None or (since and since >= mtime):
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
+        import numpy as np
+        from ..colmap.model import read_points
+
+        positions, colors = read_points(model_dir, limit=200_000)
+        blob = (struct.pack("<dI", mtime, len(positions))
+                + positions.astype("<f4").tobytes()
+                + colors.astype("<u1").tobytes())
+        self._send(200, blob, "application/octet-stream")
 
     def api_frames_list(self) -> dict:
         """The extracted equirect frames for the open project, for the canvas viewer."""

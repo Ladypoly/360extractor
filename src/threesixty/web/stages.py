@@ -141,7 +141,10 @@ def reconstruction_steps(project: Project, colmap: Path, clip: str,
               "--database_path", str(database),
               "--image_path", str(root / "images"),
               "--output_path", str(root / "sparse"),
-              "--Mapper.ba_refine_sensor_from_rig", "0"],
+              "--Mapper.ba_refine_sensor_from_rig", "0",
+              # Snapshots let the point cloud be shown as it is built, not only at the end.
+              "--Mapper.snapshot_path", str(root / "sparse" / "snapshots"),
+              "--Mapper.snapshot_images_freq", "20"],
              COLMAP_REGISTERING),
     ]
 

@@ -4,6 +4,7 @@ import {
   InspectorSection, LogViewer, MetricStrip, StageActionBar, el, formatCount,
 } from "../components.js";
 import { icon } from "../icons.js";
+import { PointCloud } from "../pointcloud.js";
 
 const STEPS = [
   ["features", "Feature extraction"],
@@ -35,8 +36,17 @@ export function ReconstructStage(ctx) {
   const metrics = MetricStrip();
   metrics.root.style.display = "none";
 
+  // The sparse cloud, shown as COLMAP builds it (snapshots), with the log demoted to a
+  // strip beneath rather than filling the page.
+  const canvas = el("canvas", { class: "pointcloud" });
+  const cloud = PointCloud(canvas);
+  const cloudInfo = el("div", { class: "pointcloud__info" }, "No point cloud yet");
+  const cloudHost = el("div", { class: "pointcloud__host" }, canvas, cloudInfo);
+
   const log = LogViewer({ title: "COLMAP output" });
-  const workspace = el("div", { class: "workspace" }, metrics.root, log.root);
+  log.root.classList.add("log--compact");
+  const workspace = el("div", { class: "workspace" }, metrics.root, cloudHost, log.root);
+  if (cloud.ok) cloud.start();
 
   const inspector = el("aside", { class: "inspector" });
   const pipeline = InspectorSection("Pipeline", { id: "rec-steps" });
@@ -127,6 +137,28 @@ export function ReconstructStage(ctx) {
     metrics.root.style.display = "";
   }
 
+  // ── point cloud polling ──────────────────────────────────────────────
+  let lastMtime = 0;
+  let lastPoll = 0;
+  async function loadPoints() {
+    if (!cloud.ok) return;
+    try {
+      const response = await fetch(`/api/reconstruct/points?since=${lastMtime}`);
+      if (response.status !== 200) return;   // 204: unchanged
+      const buffer = await response.arrayBuffer();
+      lastMtime = new DataView(buffer).getFloat64(0, true);
+      cloud.load(buffer);
+      cloudInfo.textContent = cloud.count
+        ? `${formatCount(cloud.count)} points` : "No point cloud yet";
+    } catch { /* keep what is drawn */ }
+  }
+  function maybePoll(running) {
+    const now = Date.now();
+    if (running && now - lastPoll < 1500) return;
+    lastPoll = now;
+    loadPoints();
+  }
+
   return {
     panel,
     onJobs(job) {
@@ -135,8 +167,12 @@ export function ReconstructStage(ctx) {
       log.render(job.log || []);
       renderSteps(job.result);
       if (job.state === "done") renderMetrics(job.result);
+      // Follow the cloud while mapping runs, and pick up the final model when it lands.
+      if (job.state === "running") maybePoll(true);
+      else if (job.state === "done") loadPoints();
     },
     onEnter() {
+      loadPoints();
       ctx.api.jobs.status("reconstruct").then((job) => {
         log.render(job.log || []);
         renderSteps(job.result);

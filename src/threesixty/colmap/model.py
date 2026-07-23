@@ -273,6 +273,66 @@ def read_model(path: str | Path) -> SparseModel:
     )
 
 
+# -- points (for the live reconstruction view) ------------------------------
+
+#: One points3D.bin record's fixed part: id, xyz, rgb, error, track length. The
+#: variable-length track (image_id, point2D_idx pairs) is skipped -- the view only wants
+#: positions and colours.
+_POINT_RECORD = struct.Struct("<QdddBBBdQ")
+
+
+def read_points(model_dir: str | Path, limit: int | None = None
+                ) -> tuple[np.ndarray, np.ndarray]:
+    """Point positions (N,3 float32) and colours (N,3 uint8) from a sparse model.
+
+    `limit` subsamples uniformly, so a huge model still returns a quick preview.
+    """
+    directory = Path(model_dir)
+    binary = directory / "points3D.bin"
+    text = directory / "points3D.txt"
+    if binary.exists():
+        positions, colors = _read_points_binary(binary)
+    elif text.exists():
+        positions, colors = _read_points_text(text)
+    else:
+        return np.empty((0, 3), np.float32), np.empty((0, 3), np.uint8)
+
+    if limit and len(positions) > limit:
+        step = len(positions) // limit
+        positions, colors = positions[::step][:limit], colors[::step][:limit]
+    return positions, colors
+
+
+def _read_points_binary(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    positions: list[tuple[float, float, float]] = []
+    colors: list[tuple[int, int, int]] = []
+    with open(path, "rb") as handle:
+        (count,) = _read(handle, "<Q")
+        size = _POINT_RECORD.size
+        for _ in range(count):
+            record = handle.read(size)
+            if len(record) < size:
+                break
+            values = _POINT_RECORD.unpack(record)
+            positions.append(values[1:4])
+            colors.append(values[4:7])
+            handle.read(values[8] * 8)   # skip the track (two int32 per element)
+    return (np.array(positions, np.float32).reshape(-1, 3),
+            np.array(colors, np.uint8).reshape(-1, 3))
+
+
+def _read_points_text(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    positions, colors = [], []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        parts = line.split()
+        positions.append((float(parts[1]), float(parts[2]), float(parts[3])))
+        colors.append((int(parts[4]), int(parts[5]), int(parts[6])))
+    return (np.array(positions, np.float32).reshape(-1, 3),
+            np.array(colors, np.uint8).reshape(-1, 3))
+
+
 # -- writing (used by tests and by the export step) -------------------------
 
 
