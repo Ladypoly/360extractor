@@ -44,8 +44,12 @@ export function CaptureStage(ctx) {
   const timeSlider = el("input", { type: "range", min: 0, max: 0, step: 0.1, value: 0,
                                    style: "flex:1" });
   const timeLabel = el("span", { class: "actionbar__detail" }, "0.0s");
+  // Tints the current frame's mask over the panorama on the canvas (live detection).
+  const overlayMasks = el("input", { type: "checkbox" });
+  const overlayToggle = el("label", { class: "overlay-toggle" }, overlayMasks, "overlay masks");
   const timeline = el("div", { class: "log__bar" },
-    el("span", {}, "frame"), timeSlider, timeLabel);
+    el("span", {}, "frame"), timeSlider, timeLabel, overlayToggle);
+  overlayMasks.addEventListener("change", () => loadFrame(local.frameIndex));
 
   const workspace = el("div", { class: "workspace" }, canvasHost, timeline);
 
@@ -153,11 +157,7 @@ export function CaptureStage(ctx) {
 
   const previewSection = InspectorSection("Camera preview", { id: "cap-preview" });
   const previewImage = el("img", { style: "width:100%;border-radius:5px;display:none" });
-  const overlayMasks = el("input", { type: "checkbox" });
-  previewSection.body.append(
-    el("div", { class: "field" }, el("label", {}, "overlay masks"), overlayMasks),
-    previewImage);
-  overlayMasks.addEventListener("change", () => previewCamera());
+  previewSection.body.append(previewImage);
 
   // Occluder and Rig-orientation sections are intentionally not mounted: masking now
   // lives in its own flow and every camera shares one global FOV/shape. Their element
@@ -876,8 +876,7 @@ export function CaptureStage(ctx) {
       if (!camera || !camera.enabled || (!local.frames.length && !local.media)) {
         previewImage.style.display = "none"; return;
       }
-      const payload = { rig: local.rig, camera: camera.name, width: 420,
-                        overlay: overlayMasks.checked };
+      const payload = { rig: local.rig, camera: camera.name, width: 420 };
       // Project the extracted frame Capture is working on; fall back to the source video.
       if (local.frames.length) payload.frame = local.frames[local.frameIndex];
       else { payload.path = local.media.path; payload.time = parseFloat(timeSlider.value) || 0; }
@@ -972,14 +971,29 @@ export function CaptureStage(ctx) {
     } catch { /* leave the viewer as it is */ }
   }
 
-  function loadFrame(index) {
+  async function loadFrame(index) {
     if (!local.frames.length || !local.clip) return;
     local.frameIndex = Math.max(0, Math.min(index, local.frames.length - 1));
     timeSlider.value = local.frameIndex;
+    const name = local.frames[local.frameIndex];
+
+    let src = `/frames/${local.clip}/${name}`;
+    if (overlayMasks.checked) {
+      // Live detection on this frame, tinted over the panorama (what will be masked).
+      overlayToggle.classList.add("is-busy");
+      try {
+        const detect = ctx.state.project ? ctx.state.project.detect : undefined;
+        const { url } = await ctx.api.post("/api/mask/preview",
+                                           { frame: name, objects: true, detect });
+        src = url;
+      } catch (error) { ctx.report(error); }
+      finally { overlayToggle.classList.remove("is-busy"); }
+    }
+
     const img = new Image();
     img.onload = () => { local.image = img; fitCanvas(); };
-    img.src = `/frames/${local.clip}/${local.frames[local.frameIndex]}`;
-    previewCamera();  // keep the camera preview (and mask overlay) on the same frame
+    img.src = src;
+    previewCamera();
   }
 
   // FOV/shape are global: a change rewrites every camera, not just the selected one.

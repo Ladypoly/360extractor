@@ -746,17 +746,29 @@ class Handler(BaseHTTPRequestHandler):
         ``objects: true`` it also runs detection on this frame -- more expensive, so it
         is on-demand behind the Preview button rather than every scrub.
         """
-        info = probe_media(payload["path"], self.session.ffmpeg)
-        time = float(payload.get("time", 0.0))
         width = int(payload.get("width", 1280))
         height = width // 2
         ffmpeg = self.session.ffmpeg
 
+        # Source: an extracted frame from the project (Capture) or a source path/time.
+        project = self.session.project
+        frame_name = payload.get("frame")
+        seek = None
+        if frame_name and project and project.resolved_sources():
+            clip = safe_stem(project.resolved_sources()[0].stem)
+            source_path = frames.frames_dir(project.root, clip) / frame_name
+            if not source_path.exists():
+                raise ValueError(f"no such frame: {frame_name}")
+        else:
+            source_path = Path(payload["path"])
+            if probe_media(source_path, ffmpeg).is_video:
+                seek = float(payload.get("time", 0.0)) or None
+
         frame = self.session.next_name(".jpg")
         argv = [str(ffmpeg.path), "-hide_banner", "-loglevel", "error", "-y"]
-        if info.is_video and time > 0:
-            argv += ["-ss", f"{time:g}"]
-        argv += ["-i", str(info.path), "-vf", f"scale={width}:{height}",
+        if seek:
+            argv += ["-ss", f"{seek:g}"]
+        argv += ["-i", str(source_path), "-vf", f"scale={width}:{height}",
                  "-frames:v", "1", "-q:v", "4", str(frame)]
         result = subprocess.run(argv, capture_output=True, text=True, errors="replace")
         if result.returncode != 0 or not frame.exists():
