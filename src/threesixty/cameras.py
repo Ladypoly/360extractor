@@ -17,11 +17,13 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from dataclasses import replace as dc_replace
+
 from .ffmpeg import FFmpegError, FFmpegInfo, probe_media
 from .mask import geometric
 from .mask.apply import link_sidecars
 from .plan import build_filter_graph, camera_size, safe_stem
-from .rig import Rig
+from .rig import Grade, Rig
 
 
 @dataclass
@@ -73,15 +75,98 @@ def _sequence(frames_directory: Path) -> tuple[str, int]:
     return f"%0{digits}d.jpg", int(files[0].stem)
 
 
+def _detect_equirect_masks(ffmpeg, frames_directory: Path, rig: Rig, detect,
+                           sky_cone_angle, work_dir: Path, on_progress, should_cancel):
+    """Detect on each equirect frame and write a per-frame ignore-mask; return its dir.
+
+    Detection runs on the panorama frames themselves (the two-stage choice), each combined
+    with the static occluders / sky cone. Returns None when there is nothing to detect
+    (no classes or no ML), so the caller falls back to the static-only path.
+    """
+    classes = list(getattr(detect, "classes", []) or [])
+    if not classes:
+        return None
+    from .mask import ml
+    if not ml.available():
+        return None
+    import cv2
+    import numpy as np
+
+    backend = ml.make_backend(
+        getattr(detect, "backend", "sam2.1"), classes=classes,
+        confidence=getattr(detect, "confidence", 0.25),
+        dilate=getattr(detect, "dilate", 6), device=getattr(detect, "device", None))
+
+    frames = sorted(frames_directory.glob("*.jpg"))
+    if not frames:
+        return None
+    sample = cv2.imread(str(frames[0]))
+    height, width = sample.shape[:2]
+
+    raw = list(rig.occluders)
+    if sky_cone_angle and sky_cone_angle > 0:
+        raw.append({"type": "zenith_cone", "angle": float(sky_cone_angle)})
+    occluders = [o for o in (geometric.Occluder.from_dict(d) for d in raw)
+                 if o.kind != "ml"]
+    static = None
+    if occluders:
+        static_path = geometric.build_equirect_mask(
+            ffmpeg, occluders, width, height, work_dir / "static.png")
+        static = cv2.imread(str(static_path), cv2.IMREAD_GRAYSCALE)
+
+    out_dir = work_dir / "equirect_masks"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    total = len(frames)
+    for index, frame in enumerate(frames):
+        if should_cancel and should_cancel():
+            break
+        mask = np.asarray(backend.detect([frame])[0].mask)   # white keeps, black ignores
+        if static is not None:
+            stationary = static if static.shape == mask.shape else \
+                cv2.resize(static, (mask.shape[1], mask.shape[0]))
+            mask = np.minimum(mask, stationary)              # the stricter of the two wins
+        cv2.imwrite(str(out_dir / f"{frame.stem}.png"), mask)
+        if on_progress is not None:
+            on_progress((index + 1) / total, index + 1, 0.0)
+    return out_dir
+
+
+def _project_mask_sequence(ffmpeg, mask_sequence_dir: Path, rig: Rig, cameras, sizes,
+                           output_root: Path, clip: str, start_number: int,
+                           pattern: str) -> int:
+    """Project the per-frame equirect mask sequence into per-camera mask sidecars."""
+    mask_pattern = pattern.replace(".jpg", ".png")
+    # Neutral grade and nearest sampling: a mask must not be graded or interpolated.
+    mask_rig = dc_replace(rig, grade=Grade(),
+                          output=dc_replace(rig.output, interp="near", format="png"))
+    graph, labels = build_filter_graph(cameras, mask_rig, "", sizes=sizes, burn=False)
+
+    argv = [str(ffmpeg.path), "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+            "-start_number", str(start_number),
+            "-i", str(mask_sequence_dir / mask_pattern), "-filter_complex", graph]
+    directories = []
+    for label, camera in zip(labels, cameras):
+        mask_dir = output_root / "masks" / clip / camera.name
+        mask_dir.mkdir(parents=True, exist_ok=True)
+        directories.append(mask_dir)
+        argv += ["-map", f"[{label}]", "-start_number", str(start_number),
+                 str(mask_dir / mask_pattern)]
+    result = subprocess.run(argv, capture_output=True, text=True, errors="replace")
+    if result.returncode != 0:
+        raise FFmpegError(f"mask projection failed: {result.stderr.strip()}")
+    return sum(len(list(directory.glob("*.png"))) for directory in directories)
+
+
 def generate_cameras(ffmpeg: FFmpegInfo, frames_directory: str | Path, rig: Rig,
                      output_root: str | Path, clip: str | None = None,
-                     sky_cone_angle: float | None = None,
-                     on_progress=None, should_cancel=None,
+                     sky_cone_angle: float | None = None, detect=None,
+                     on_progress=None, on_mask_progress=None, should_cancel=None,
                      overwrite: bool = True) -> CamerasResult:
     """Project every extracted frame through the rig into images/<clip>/<camera>/.
 
-    When there are static occluders or a sky cone, also writes the matching per-camera
-    mask sidecars so the result is training-ready without a separate masking pass.
+    Also writes the matching per-camera mask sidecars so the result is training-ready:
+    per-frame detection on the panorama frames when `detect` has classes and ML is
+    installed, otherwise just the static occluders / sky cone.
     """
     rig.validate()
     frames_directory = Path(frames_directory)
@@ -144,7 +229,18 @@ def generate_cameras(ffmpeg: FFmpegInfo, frames_directory: str | Path, rig: Rig,
     written = sum(len(list(directory.glob("*.jpg"))) for directory in directories)
     masks_written = 0
     if not cancelled:
-        masks_written = _project_masks(ffmpeg, rig, cameras, sizes, directories, sample,
-                                       Path(output_root), clip, sky_cone_angle)
+        root = Path(output_root)
+        equirect_masks = _detect_equirect_masks(
+            ffmpeg, frames_directory, rig, detect, sky_cone_angle,
+            root / ".threesixty" / "masks", on_mask_progress, should_cancel)
+        if equirect_masks is not None:
+            # Per-frame masks (detection): project the whole sequence.
+            masks_written = _project_mask_sequence(
+                ffmpeg, equirect_masks, rig, cameras, sizes, root, clip,
+                start_number, pattern)
+        else:
+            # Static only: one rigid mask per camera, linked beside every frame.
+            masks_written = _project_masks(ffmpeg, rig, cameras, sizes, directories,
+                                           sample, root, clip, sky_cone_angle)
     return CamerasResult(directories=directories, images_written=written,
                          masks_written=masks_written, cancelled=cancelled)

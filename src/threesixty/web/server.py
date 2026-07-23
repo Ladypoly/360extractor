@@ -1121,8 +1121,11 @@ class Handler(BaseHTTPRequestHandler):
         def work(running_job) -> dict:
             result = cameras.generate_cameras(
                 session.ffmpeg, frames_directory, rig, project.root, clip=clip,
-                sky_cone_angle=sky_cone,
-                on_progress=lambda frac, n, _t: running_job.progress(frac, f"frame {n}"),
+                sky_cone_angle=sky_cone, detect=detect,
+                on_progress=lambda frac, n, _t:
+                    running_job.progress(0.4 * frac, f"projecting frame {n}"),
+                on_mask_progress=lambda frac, n, _t:
+                    running_job.progress(0.4 + 0.6 * frac, f"masking frame {n}"),
                 should_cancel=running_job.cancel.is_set)
             project.mark_done("extract", images=result.images_written)
             if result.masks_written:
