@@ -41,6 +41,10 @@ function buildTopBar() {
     html: `${icon(iconName, { size: 14 })}<span>${label}</span>`,
   });
 
+  const recentMenu = el("div", { class: "menu", role: "menu", hidden: true });
+  const recentBtn = button("Recent", "layers",
+    () => toggleRecent(recentMenu, recentBtn), "Recently opened projects");
+
   const bar = el("header", { class: "topbar" },
     el("div", { class: "brand" },
       el("span", { class: "brand__name" }, "360extract"),
@@ -48,12 +52,13 @@ function buildTopBar() {
     el("div", { class: "source-meta" }, sourceName, sourceInfo),
     el("div", { class: "topbar__spacer" }),
     el("div", { class: "topbar__actions" },
+      el("div", { class: "menu-anchor" }, recentBtn, recentMenu),
       button("Open", "folder", openProject, "Open a project folder"),
-      button("Save", "save", saveProject, "Save the project"),
       button("System", "system", showSystem, "Detected tools")));
 
   return {
     bar,
+    recentMenu,
     setProject: (project) => {
       projectName.textContent = project ? project.name : "no project";
     },
@@ -86,18 +91,64 @@ async function openProject() {
   } catch (error) { report(error); }
 }
 
-async function saveProject() {
+async function openRecent(root) {
   try {
-    const payload = stages.capture ? stages.capture.projectPayload() : {};
-    if (!state.project) {
-      const paths = await api.pick("directory", "Choose a folder for the project");
-      if (!paths.length) return;
-      payload.root = paths[0];
-    }
-    const { project } = await api.post("/api/project/save", payload);
-    applyProject(project, { keepMedia: true });
-    flash("Project saved");
+    const { project } = await api.post("/api/project/open", { path: root });
+    applyProject(project);
   } catch (error) { report(error); }
+}
+
+// The whole project lives in one folder and saves itself: on open, on every settings
+// change (debounced), and as each stage finishes. There is no Save button because there
+// is nothing a save would capture that is not already on disk moments later.
+let autosaveTimer = null;
+function autosave() {
+  if (!state.project) return;
+  clearTimeout(autosaveTimer);
+  autosaveTimer = setTimeout(async () => {
+    if (!state.project) return;
+    try {
+      const payload = stages.capture ? stages.capture.projectPayload() : {};
+      const { project } = await api.post("/api/project/save", payload);
+      state.project = project;
+      topbar.setProject(project);
+    } catch { /* a later save catches up; not worth interrupting the user */ }
+  }, 900);
+}
+
+// ── recent menu ──────────────────────────────────────────────────────────
+
+let closeRecent = null;
+async function toggleRecent(menu, anchor) {
+  if (!menu.hidden) { hideRecent(menu); return; }
+  try {
+    const { recent } = await api.get("/api/recent");
+    menu.replaceChildren();
+    if (!recent.length) {
+      menu.append(el("div", { class: "menu__empty" }, "No recent projects"));
+    }
+    for (const entry of recent) {
+      const row = el("button", {
+        class: `menu__item${entry.exists ? "" : " menu__item--missing"}`,
+        type: "button", role: "menuitem", title: entry.root,
+        onclick: () => { hideRecent(menu); openRecent(entry.root); },
+      },
+        el("span", { class: "menu__title" }, entry.name || entry.root),
+        el("span", { class: "menu__path" }, entry.exists ? entry.root : "missing"));
+      menu.append(row);
+    }
+    menu.hidden = false;
+    closeRecent = (event) => {
+      if (!menu.contains(event.target) && event.target !== anchor
+          && !anchor.contains(event.target)) hideRecent(menu);
+    };
+    setTimeout(() => document.addEventListener("click", closeRecent), 0);
+  } catch (error) { report(error); }
+}
+
+function hideRecent(menu) {
+  menu.hidden = true;
+  if (closeRecent) { document.removeEventListener("click", closeRecent); closeRecent = null; }
 }
 
 export function applyProject(project, { keepMedia = false } = {}) {
@@ -211,7 +262,7 @@ async function boot() {
     api, state,
     setSource: (media) => { state.media = media; topbar.setSource(media); },
     goTo, report, flash, pokeJobs,
-    applyProject,
+    applyProject, autosave, openProject, openRecent,
   };
 
   stages.capture = CaptureStage(context);
@@ -235,7 +286,11 @@ async function boot() {
   try {
     const { project } = await api.get("/api/project");
     if (project) applyProject(project);
-  } catch { /* nothing open is the normal case */ }
+    // With nothing open, the last-used stage is meaningless -- and landing on, say,
+    // Reconstruct shows an empty panel with no way in. Start at Capture, which owns the
+    // "load a video or open a project" entry point.
+    else state.active = "capture";
+  } catch { state.active = "capture"; }
 
   goTo(state.active);
   refreshJobs();

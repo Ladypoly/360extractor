@@ -80,6 +80,19 @@ def app_ready(ffmpeg, tmp_path, equirect_clip):
     server.server_close()
 
 
+@pytest.fixture
+def empty_app(ffmpeg):
+    """A server with no project open: the front-door / landing case."""
+    port = free_port()
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", port),
+        type("Bound", (Handler,), {"session": Session(ffmpeg, None)}))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{port}"
+    server.shutdown()
+    server.server_close()
+
+
 def open_page(browser, url):
     page = browser.new_page(viewport={"width": 1600, "height": 900})
     problems = []
@@ -137,6 +150,35 @@ class TestShell:
         page.wait_for_selector("#system-dialog .tool-row")
         names = page.locator("#system-dialog .tool-row__name").all_inner_texts()
         assert {"FFmpeg", "COLMAP", "Brush", "SuperSplat"} <= set(names)
+
+
+class TestLanding:
+    def test_with_no_project_it_lands_on_capture_showing_the_front_door(
+            self, browser, empty_app):
+        page = open_page(browser, empty_app)
+        try:
+            # Capture is the visible panel, not whatever stage was last used.
+            assert page.locator("#stage-panel-capture").is_visible()
+            assert page.locator("#stage-tab-capture").get_attribute("aria-selected") == "true"
+            # The landing (drop zone + Browse + Open project) is shown; the editor is not.
+            assert page.locator(".stage-panel--empty .landing__drop").is_visible()
+            assert page.locator("#stage-panel-capture .inspector").is_hidden()
+            assert page.problems == []
+        finally:
+            page.close()
+
+    def test_a_stale_last_stage_does_not_strand_the_user(self, browser, empty_app):
+        """Reported bug: reopening landed on Reconstruct with no way back in."""
+        page = open_page(browser, empty_app)
+        try:
+            page.evaluate("localStorage.setItem('stage', 'reconstruct')")
+            page.reload(wait_until="networkidle")
+            page.wait_for_selector(".pipeline .stage")
+            page.wait_for_timeout(300)
+            assert page.locator("#stage-panel-capture").is_visible()
+            assert page.locator("#stage-panel-reconstruct").is_hidden()
+        finally:
+            page.close()
 
 
 class TestStageOwnership:
@@ -247,9 +289,12 @@ class TestJobsAcrossStages:
 @pytest.mark.parametrize("key", STAGES)
 def test_screenshot(page, key, tmp_path_factory):
     """Screenshots for review, at a standard desktop size."""
-    page.click(f"#stage-tab-{key}") if not page.locator(f"#stage-tab-{key}").is_disabled() \
-        else page.evaluate(f"document.querySelector('#stage-tab-{key}').disabled = false")
-    page.click(f"#stage-tab-{key}")
+    # Navigate straight through the app's own handler rather than clicking the tab: a
+    # disabled (not-yet-ready) stage cannot be clicked, and the job poll re-disables it
+    # between enabling and clicking. This is deterministic regardless of poll timing.
+    page.evaluate(
+        f"{{ const b = document.querySelector('#stage-tab-{key}');"
+        f"   b.disabled = false; b.click(); }}")
     page.wait_for_timeout(500)
     output = tmp_path_factory.mktemp("shots") / f"{key}.png"
     page.screenshot(path=str(output))

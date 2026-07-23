@@ -25,8 +25,9 @@ from ..mask import geometric
 from ..tools import survey as tool_survey
 from ..extract import run_extraction
 from ..ffmpeg import FFmpegError, MediaInfo, probe_media, resolve_ffmpeg
-from ..plan import FrameSelection, camera_size, plan_extraction
+from ..plan import FrameSelection, camera_size, plan_extraction, safe_stem
 from ..project import (
+    PROJECT_FILENAME,
     STAGES,
     DetectSettings,
     FrameSettings,
@@ -34,7 +35,13 @@ from ..project import (
     Project,
     ProjectError,
 )
+from .. import motion, recent, segment, userpresets
 from ..rig import PRESETS, Camera, Grade, Orientation, Output, Rig, RigError
+
+#: Occluder kinds a global rig preset may carry. `nadir_cone`/`zenith_cone` are angles
+#: and travel between projects; `equirect_mask` (a painted file) and `ml` are tied to one
+#: project's assets, so they are stripped before a preset is saved.
+PORTABLE_OCCLUDERS = {"nadir_cone", "zenith_cone"}
 
 STATIC = Path(__file__).parent / "static"
 PREVIEW_WIDTH = 1600
@@ -211,8 +218,7 @@ class Handler(BaseHTTPRequestHandler):
             elif _static_type(route.path):
                 self._serve_static(route.path)
             elif route.path == "/api/presets":
-                self._json({"presets": {name: factory().to_dict()
-                                        for name, factory in PRESETS.items()}})
+                self._json(self._presets_payload())
             elif route.path == "/api/progress":
                 # Kept for the CLI-era clients and tests: report whichever stage is
                 # running, or capture's last state when nothing is.
@@ -235,6 +241,8 @@ class Handler(BaseHTTPRequestHandler):
                 project = self.session.project
                 self._json({"project": self._project_payload(project)
                             if project else None})
+            elif route.path == "/api/recent":
+                self._json({"recent": recent.entries()})
             elif route.path.startswith("/preview/"):
                 name = Path(route.path).name
                 self._file(self.session.cache / name, "image/jpeg")
@@ -260,6 +268,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.api_rig_save(payload))
             elif route.path == "/api/rig/load":
                 self._json(self.api_rig_load(payload))
+            elif route.path == "/api/preset/save":
+                self._json(self.api_preset_save(payload))
+            elif route.path == "/api/preset/delete":
+                self._json(self.api_preset_delete(payload))
             elif route.path == "/api/extract":
                 self._json(self.api_extract(payload))
             elif route.path == "/api/job/cancel":
@@ -291,6 +303,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.api_project_save(payload))
             elif route.path == "/api/project/new":
                 self._json(self.api_project_new(payload))
+            elif route.path == "/api/project/for-source":
+                self._json(self.api_project_for_source(payload))
+            elif route.path == "/api/segment":
+                self._json(self.api_segment(payload))
+            elif route.path == "/api/recent/remove":
+                recent.remove(payload["root"])
+                self._json({"recent": recent.entries()})
             elif route.path == "/api/preview/grade":
                 self._json(self.api_preview_grade(payload))
             elif route.path == "/api/grade/auto":
@@ -542,12 +561,104 @@ class Handler(BaseHTTPRequestHandler):
             overwrite=bool(payload.get("force")),
         )
         self.session.project = project
+        recent.record(project.root, project.name)
         return {"project": self._project_payload(project)}
 
     def api_project_open(self, payload: dict) -> dict:
         project = Project.load(payload["path"])
         self.session.project = project
+        recent.record(project.root, project.name)
         return {"project": self._project_payload(project)}
+
+    def api_project_for_source(self, payload: dict) -> dict:
+        """Ensure a project for a just-opened source, in a folder beside it.
+
+        Opening a video *is* opening a project now: the dataset lands in a subfolder
+        named after the clip (`<video folder>/<clip>/`), so several clips in one folder
+        never collide. Reopening a clip whose folder already has a `project.json`
+        resumes it -- what is on disk wins over whatever the UI is currently showing,
+        so a settings payload is honoured only when the project is created fresh.
+        """
+        source = Path(payload["path"])
+        if not source.exists():
+            raise ValueError(f"{source} does not exist")
+
+        root = source.parent / safe_stem(source.stem)
+        if (root / PROJECT_FILENAME).exists():
+            project = Project.load(root)
+            resolved = str(source.resolve())
+            if resolved not in {str(project.absolute(s).resolve())
+                                for s in project.sources}:
+                project.sources.append(project.relative(str(source)))
+                project.save()
+        else:
+            project = Project.create(root, sources=[str(source)])
+            if "rig" in payload:
+                project.rig = rig_from_payload(payload["rig"])
+            for key, target in (("frames", FrameSettings), ("output", OutputSettings)):
+                if key in payload:
+                    current = asdict(getattr(project, key))
+                    current.update(payload[key])
+                    setattr(project, key, target(**current))
+            project.save()
+
+        self.session.project = project
+        recent.record(project.root, project.name)
+        return {"project": self._project_payload(project)}
+
+    def api_segment(self, payload: dict) -> dict:
+        """Split one source into a project per segment, beside the video.
+
+        Each segment is a `<stem>_segNN/` project carrying its own start/end window; the
+        user then extracts each independently (a long drive reconstructs far better as
+        several short datasets than as one). Modes: `duration` (seconds), `motion`
+        (forward travel estimated from the video), `gpx` (metres along a sidecar track).
+        """
+        from .. import gps
+
+        source = Path(payload["path"])
+        if not source.exists():
+            raise ValueError(f"{source} does not exist")
+        info = probe_media(source, self.session.ffmpeg)
+        mode = payload.get("mode", "duration")
+
+        if mode == "duration":
+            segments = segment.segment_by_duration(info.duration, float(payload["seconds"]))
+        elif mode == "gpx":
+            track = source.with_suffix(".gpx")
+            if not track.exists():
+                raise ValueError(f"no GPX sidecar next to the video (expected {track.name})")
+            segments = segment.segment_by_gpx(gps.read_gpx(track), float(payload["meters"]))
+        elif mode == "motion":
+            if not motion.available():
+                raise ValueError('motion segmentation needs OpenCV: pip install -e ".[ml]"')
+            samples = motion.forward_motion(self.session.ffmpeg, source)
+            if payload.get("speed_kph"):
+                segments = segment.segment_by_motion(
+                    samples, meters=float(payload["meters"]),
+                    speed_kph=float(payload["speed_kph"]))
+            else:
+                segments = segment.segment_by_motion(samples, count=int(payload["count"]))
+        else:
+            raise ValueError(f"unknown segment mode {mode!r}")
+
+        pad = max(2, len(str(len(segments))))
+        stem = safe_stem(source.stem)
+        created = []
+        for seg in segments:
+            root = source.parent / f"{stem}_seg{seg.index + 1:0{pad}d}"
+            project = Project.create(root, sources=[str(source)],
+                                     name=root.name, overwrite=True)
+            project.frames.start = round(seg.start, 3)
+            project.frames.end = round(seg.end, 3)
+            project.save()
+            recent.record(project.root, project.name)
+            created.append({
+                "index": seg.index, "start": seg.start, "end": seg.end,
+                "distance": seg.distance, "approximate": seg.approximate,
+                "root": str(project.root), "name": project.name,
+            })
+        return {"segments": created, "mode": mode}
 
     def api_project_save(self, payload: dict) -> dict:
         """Write the UI's current state into the project.
@@ -786,6 +897,39 @@ class Handler(BaseHTTPRequestHandler):
     def api_rig_load(self, payload: dict) -> dict:
         return {"rig": Rig.load(payload["path"]).to_dict()}
 
+    def _presets_payload(self) -> dict:
+        """Built-in presets merged with the user's saved ones, for the rig dropdown.
+
+        User names cannot collide with built-ins (save refuses that), so a plain merge
+        is unambiguous; `user` tells the UI which ones it may delete.
+        """
+        presets = {name: factory().to_dict() for name, factory in PRESETS.items()}
+        stored = userpresets.stored()
+        presets.update(stored)
+        return {"presets": presets, "user": sorted(stored)}
+
+    def api_preset_save(self, payload: dict) -> dict:
+        name = (payload.get("name") or "").strip()
+        if not name:
+            raise ValueError("name the preset before saving it")
+        if name in PRESETS:
+            raise ValueError(f"{name!r} is a built-in preset; choose another name")
+
+        # Validate by building a real rig, then store the normalized form minus the
+        # occluders that only make sense inside one project.
+        rig = rig_from_payload(payload["rig"]).to_dict()
+        rig["occluders"] = [o for o in rig.get("occluders", [])
+                            if o.get("type") in PORTABLE_OCCLUDERS]
+        userpresets.save(name, rig)
+        return self._presets_payload()
+
+    def api_preset_delete(self, payload: dict) -> dict:
+        name = (payload.get("name") or "").strip()
+        if name in PRESETS:
+            raise ValueError(f"{name!r} is a built-in preset and cannot be deleted")
+        userpresets.delete(name)
+        return self._presets_payload()
+
     def api_extract(self, payload: dict) -> dict:
         job = self.session.jobs["capture"]
         rig = rig_from_payload(payload["rig"])
@@ -799,7 +943,11 @@ class Handler(BaseHTTPRequestHandler):
             end=payload.get("end"),
         )
         selection.validate()
-        output_dir = payload.get("output_dir") or "dataset"
+        # With a project open its folder is the destination, so the dataset always
+        # lands beside the project.json that describes it. The output_dir field is only
+        # a fallback for the project-less path the tests still exercise.
+        project = self.session.project
+        output_dir = str(project.root) if project else (payload.get("output_dir") or "dataset")
         session = self.session
 
         def work(running_job) -> dict:
@@ -831,6 +979,18 @@ class Handler(BaseHTTPRequestHandler):
                 result = run_extraction(plan, session.ffmpeg, on_progress=report)
                 total += result.images_written
                 running_job.log(f"{info.path.name}: {result.images_written} images")
+
+            # Record the step in the project so the pipeline knows extraction is done
+            # -- and with which rig/frames, so it can tell "done" from "stale" later.
+            if project is not None:
+                project.rig = rig
+                project.frames = FrameSettings(
+                    mode=selection.mode, value=selection.value,
+                    start=selection.start, end=selection.end)
+                project.output.mask_mode = payload.get(
+                    "mask_mode", project.output.mask_mode)
+                project.mark_done("extract", images=total)
+                project.save()
 
             return {"images": total,
                     "summary": f"{total} images written to {output_dir}"}

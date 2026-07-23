@@ -6,12 +6,14 @@ file that vanished on reboot. These tests pin it to the project.
 
 import base64
 import json
+import shutil
 import socket
 import subprocess
 import threading
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
@@ -19,6 +21,16 @@ from threesixty.project import Project
 from threesixty.web.server import Handler, Session
 
 pytestmark = pytest.mark.ffmpeg
+
+# A due-east track at the equator, ~100 m/s, 4 s -> ~300 m total.
+GPX = """<?xml version="1.0"?>
+<gpx version="1.1"><trk><trkseg>
+<trkpt lat="0.0" lon="0.000000"><time>2020-01-01T00:00:00Z</time></trkpt>
+<trkpt lat="0.0" lon="0.000898"><time>2020-01-01T00:00:01Z</time></trkpt>
+<trkpt lat="0.0" lon="0.001796"><time>2020-01-01T00:00:02Z</time></trkpt>
+<trkpt lat="0.0" lon="0.002694"><time>2020-01-01T00:00:03Z</time></trkpt>
+</trkseg></trk></gpx>
+"""
 
 
 def free_port():
@@ -141,6 +153,190 @@ class TestProjectEndpoints:
         reopened = Project.load(tmp_path / "p")
         assert reopened.detect.confidence == 0.6
         assert reopened.frames.value == 4
+
+
+class TestOpenSourceCreatesProject:
+    """Opening a video is opening a project: one is created in a folder beside it."""
+
+    def test_creates_a_project_in_a_subfolder_named_after_the_clip(self, make_ui, tmp_path):
+        source = tmp_path / "Q360_0001.mp4"
+        source.write_bytes(b"not really a video")
+        base, session = make_ui()
+
+        status, body = post(base, "/api/project/for-source", {"path": str(source)})
+        assert status == 200
+        assert body["project"]["root"] == str(tmp_path / "Q360_0001")
+        assert (tmp_path / "Q360_0001" / "project.json").exists()
+        assert session.project is not None
+        # The source is registered, so export and extraction have something to run on.
+        assert body["project"]["sources"] == [str(source)]
+
+    def test_seeds_a_new_project_from_the_ui_settings(self, make_ui, tmp_path):
+        source = tmp_path / "clip.mp4"
+        source.write_bytes(b"x")
+        base, _ = make_ui()
+
+        post(base, "/api/project/for-source", {
+            "path": str(source), "frames": {"mode": "every", "value": 9}})
+        assert Project.load(tmp_path / "clip").frames.value == 9
+
+    def test_reopening_the_same_clip_resumes_its_project(self, make_ui, tmp_path):
+        source = tmp_path / "clip.mp4"
+        source.write_bytes(b"x")
+        existing = Project.create(tmp_path / "clip", name="clip")
+        existing.frames.value = 5
+        existing.save()
+        base, _ = make_ui()
+
+        # Disk wins over whatever the UI is currently showing.
+        _, body = post(base, "/api/project/for-source", {
+            "path": str(source), "frames": {"mode": "fps", "value": 99}})
+        assert body["project"]["frames"]["value"] == 5
+
+    def test_missing_source_is_rejected(self, make_ui, tmp_path):
+        base, _ = make_ui()
+        status, body = post(base, "/api/project/for-source",
+                            {"path": str(tmp_path / "nope.mp4")})
+        assert status == 400
+        assert "does not exist" in body["error"]
+
+
+class TestRecentProjects:
+    def test_opened_projects_appear_newest_first(self, make_ui, tmp_path):
+        Project.create(tmp_path / "a", name="alpha")
+        Project.create(tmp_path / "b", name="beta")
+        base, _ = make_ui()
+
+        post(base, "/api/project/open", {"path": str(tmp_path / "a")})
+        post(base, "/api/project/open", {"path": str(tmp_path / "b")})
+
+        recent = get(base, "/api/recent")["recent"]
+        assert [e["name"] for e in recent] == ["beta", "alpha"]
+        assert all(e["exists"] for e in recent)
+
+    def test_reopening_moves_to_front_without_duplicating(self, make_ui, tmp_path):
+        Project.create(tmp_path / "a", name="alpha")
+        Project.create(tmp_path / "b", name="beta")
+        base, _ = make_ui()
+        for name in ("a", "b", "a"):
+            post(base, "/api/project/open", {"path": str(tmp_path / name)})
+
+        recent = get(base, "/api/recent")["recent"]
+        assert [e["name"] for e in recent] == ["alpha", "beta"]
+
+    def test_remove_drops_an_entry(self, make_ui, tmp_path):
+        Project.create(tmp_path / "a", name="alpha")
+        base, _ = make_ui()
+        post(base, "/api/project/open", {"path": str(tmp_path / "a")})
+
+        status, body = post(base, "/api/recent/remove",
+                            {"root": str((tmp_path / "a").resolve())})
+        assert status == 200
+        assert body["recent"] == []
+
+
+class TestSegmentEndpoint:
+    def _drive(self, tmp_path, equirect_clip):
+        source = tmp_path / "drive.mp4"
+        shutil.copy(equirect_clip, source)
+        return source
+
+    def test_duration_creates_a_project_per_segment(self, make_ui, tmp_path, equirect_clip):
+        source = self._drive(tmp_path, equirect_clip)          # 2 s clip
+        base, _ = make_ui()
+        status, body = post(base, "/api/segment",
+                            {"path": str(source), "mode": "duration", "seconds": 1.0})
+        assert status == 200
+        segs = body["segments"]
+        assert len(segs) == 2
+        assert segs[0]["name"] == "drive_seg01"
+        for seg in segs:
+            root = Path(seg["root"])
+            assert (root / "project.json").exists()
+            loaded = Project.load(root)
+            assert loaded.frames.start == pytest.approx(seg["start"], abs=0.01)
+            assert loaded.frames.end == pytest.approx(seg["end"], abs=0.01)
+            assert loaded.sources == [str(source)]
+
+    def test_gpx_mode_cuts_by_distance(self, make_ui, tmp_path, equirect_clip):
+        source = self._drive(tmp_path, equirect_clip)
+        (tmp_path / "drive.gpx").write_text(GPX, encoding="utf-8")
+        base, _ = make_ui()
+        status, body = post(base, "/api/segment",
+                            {"path": str(source), "mode": "gpx", "meters": 100.0})
+        assert status == 200
+        assert len(body["segments"]) >= 2       # ~300 m / 100 m
+        assert body["segments"][0]["distance"] == pytest.approx(100.0, rel=0.02)
+
+    def test_gpx_mode_without_a_sidecar_is_a_clear_error(self, make_ui, tmp_path,
+                                                         equirect_clip):
+        source = self._drive(tmp_path, equirect_clip)
+        base, _ = make_ui()
+        status, body = post(base, "/api/segment",
+                            {"path": str(source), "mode": "gpx", "meters": 100.0})
+        assert status == 400
+        assert "GPX" in body["error"]
+
+    def test_unknown_mode_errors(self, make_ui, tmp_path, equirect_clip):
+        source = self._drive(tmp_path, equirect_clip)
+        base, _ = make_ui()
+        status, _ = post(base, "/api/segment", {"path": str(source), "mode": "nope"})
+        assert status == 400
+
+
+class TestRigPresets:
+    RIG = {"cameras": [{"name": "solo", "yaw": 0, "h_fov": 90, "v_fov": 67.5}],
+           "output": {"auto": True}}
+
+    def test_builtins_are_listed(self, make_ui):
+        base, _ = make_ui()
+        body = get(base, "/api/presets")
+        assert {"ring", "cube"} <= set(body["presets"])
+        assert body["user"] == []
+
+    def test_saved_preset_joins_the_list_and_survives_reload(self, make_ui, tmp_path):
+        base, _ = make_ui()
+        status, body = post(base, "/api/preset/save", {"name": "my rig", "rig": self.RIG})
+        assert status == 200
+        assert "my rig" in body["presets"]
+        assert body["user"] == ["my rig"]
+
+        # A fresh server (same state dir) still has it -- presets are global, not per-run.
+        base2, _ = make_ui()
+        assert "my rig" in get(base2, "/api/presets")["presets"]
+
+    def test_save_refuses_a_builtin_name(self, make_ui):
+        base, _ = make_ui()
+        status, body = post(base, "/api/preset/save", {"name": "ring", "rig": self.RIG})
+        assert status == 400
+        assert "built-in" in body["error"]
+
+    def test_save_rejects_an_empty_name(self, make_ui):
+        base, _ = make_ui()
+        status, body = post(base, "/api/preset/save", {"name": "  ", "rig": self.RIG})
+        assert status == 400
+
+    def test_project_specific_occluders_are_stripped(self, make_ui):
+        base, _ = make_ui()
+        rig = {**self.RIG, "occluders": [
+            {"type": "nadir_cone", "angle": 20},
+            {"type": "equirect_mask", "path": "C:/proj/assets/painted.png"}]}
+        _, body = post(base, "/api/preset/save", {"name": "coned", "rig": rig})
+        kept = body["presets"]["coned"]["occluders"]
+        assert kept == [{"type": "nadir_cone", "angle": 20}]
+
+    def test_delete_removes_a_saved_preset(self, make_ui):
+        base, _ = make_ui()
+        post(base, "/api/preset/save", {"name": "temp", "rig": self.RIG})
+        status, body = post(base, "/api/preset/delete", {"name": "temp"})
+        assert status == 200
+        assert "temp" not in body["presets"]
+
+    def test_delete_refuses_a_builtin(self, make_ui):
+        base, _ = make_ui()
+        status, body = post(base, "/api/preset/delete", {"name": "cube"})
+        assert status == 400
+        assert "cube" in get(base, "/api/presets")["presets"]
 
 
 class TestPaintedOccluderLocation:

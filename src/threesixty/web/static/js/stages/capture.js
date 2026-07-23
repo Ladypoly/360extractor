@@ -29,7 +29,7 @@ const FULL_WIDTH = 1600;
 
 export function CaptureStage(ctx) {
   const local = {
-    rig: null, presets: {}, selected: 0, media: null,
+    rig: null, presets: {}, userPresets: new Set(), selected: 0, media: null,
     nadir: 0, dragging: null, image: null,
     paint: { mode: null, layer: null, brush: 40, drawing: false, last: null, dirty: false },
     coverage: {}, sizes: {},
@@ -62,29 +62,39 @@ export function CaptureStage(ctx) {
 
   const rigSection = InspectorSection("Rig", { id: "cap-rig" });
   const presetSelect = el("select", {});
+  const presetName = el("input", { type: "text", placeholder: "save current rig as…" });
+  const savePresetBtn = el("button", { class: "btn btn--ghost", type: "button",
+                                       style: "flex:0 0 auto", onclick: savePreset,
+                                       html: `${icon("save", { size: 14 })}<span>Save</span>` });
+  const deletePresetBtn = el("button", { class: "btn btn--ghost", type: "button",
+                                         style: "flex:0 0 auto", onclick: deletePreset,
+                                         title: "Delete the selected saved preset",
+                                         html: icon("trash", { size: 14 }) });
+  // FOV and shape are one global rig property applied to every camera, not a per-camera
+  // setting -- a mixed-FOV rig is not a case worth the interface it costs.
+  const camFov = slider(20, 150, 1);
+  const camShape = el("select", {},
+    ...[["1.3333", "4:3"], ["1.5", "3:2"], ["1.7778", "16:9"], ["1", "square"]]
+      .map(([value, label]) => el("option", { value }, label)));
   const camList = el("div", {});
   rigSection.body.append(
     el("div", { class: "field" }, presetSelect,
       el("button", { class: "btn", type: "button", style: "flex:0 0 auto",
-                     onclick: applyPreset }, "Use")),
+                     onclick: applyPreset }, "Use"),
+      deletePresetBtn),
+    el("div", { class: "field" }, presetName, savePresetBtn),
+    el("div", { class: "pair" }, field("fov", camFov.root), field("shape", camShape)),
     camList,
     el("div", { class: "field", style: "margin-bottom:0" },
       el("button", { class: "btn btn--ghost", type: "button", onclick: addCamera }, "Add"),
       el("button", { class: "btn btn--ghost", type: "button", onclick: duplicateCamera }, "Duplicate"),
       el("button", { class: "btn btn--ghost", type: "button", onclick: removeCamera }, "Remove")));
+  presetSelect.addEventListener("change", updatePresetButtons);
 
   const editor = InspectorSection("Selected camera", { id: "cap-camera" });
   const camName = el("input", { type: "text" });
-  const camYaw = slider(-180, 180, 1);
-  const camPitch = slider(-90, 90, 1);
-  const camFov = slider(20, 150, 1);
-  const camShape = el("select", {},
-    ...[["1.3333", "4:3"], ["1.5", "3:2"], ["1.7778", "16:9"], ["1", "square"]]
-      .map(([value, label]) => el("option", { value }, label)));
   const camSize = el("p", { class: "hint" });
-  editor.body.append(
-    field("name", camName), field("yaw", camYaw.root), field("pitch", camPitch.root),
-    field("fov", camFov.root), field("shape", camShape), camSize);
+  editor.body.append(field("name", camName), camSize);
 
   const image = InspectorSection("Image", { id: "cap-image", note: "unchanged" });
   const gradeInputs = {};
@@ -122,7 +132,8 @@ export function CaptureStage(ctx) {
       "Painted once on the panorama: the rig is rigid, so one region covers every frame."));
 
   const output = InspectorSection("Output", { id: "cap-output" });
-  const outDir = el("input", { type: "text", placeholder: "chosen with the source" });
+  const outDir = el("input", { type: "text", readonly: true, tabindex: -1,
+                               placeholder: "a folder is created beside the source" });
   const outFormat = el("select", {}, el("option", {}, "jpg"), el("option", {}, "png"));
   const outQuality = el("input", { type: "number", value: 2, min: 1, max: 31 });
   const frameMode = el("select", {},
@@ -132,11 +143,44 @@ export function CaptureStage(ctx) {
   const frameValue = el("input", { type: "number", value: 2, step: 0.5, min: 0.1 });
   const estimate = el("p", { class: "hint" });
   output.body.append(
-    el("div", { class: "field" }, el("label", {}, "folder"), outDir,
-      el("button", { class: "btn btn--ghost", type: "button", style: "flex:0 0 auto",
-                     onclick: browseOut, html: "…" })),
+    field("folder", outDir),
+    el("p", { class: "hint" }, "Created automatically beside the source; everything the "
+      + "project produces lands here and saves as you go."),
     el("div", { class: "pair" }, field("format", outFormat), field("quality", outQuality)),
     field("frames", frameMode), field("rate", frameValue), estimate);
+
+  // ── segments ─────────────────────────────────────────────────────────
+  // Split a long drive into independent projects: a kilometres-long clip reconstructs
+  // far better as several short datasets than as one that COLMAP drifts across.
+  const segments = InspectorSection("Segments", { id: "cap-segments", open: false });
+  const segMode = el("select", {},
+    ...[["off", "one project (no split)"], ["duration", "by duration"],
+        ["motion-distance", "by distance (from video motion)"],
+        ["motion-count", "by count (equal travel)"],
+        ["gpx", "by distance (GPS track)"]]
+      .map(([value, label]) => el("option", { value }, label)));
+  const segSeconds = el("input", { type: "number", value: 60, min: 1, step: 5 });
+  const segMeters = el("input", { type: "number", value: 500, min: 10, step: 50 });
+  const segSpeed = el("input", { type: "number", value: 40, min: 1, step: 5 });
+  const segCount = el("input", { type: "number", value: 4, min: 1, step: 1 });
+  const segCreateBtn = el("button", { class: "btn btn--primary", type: "button",
+                                      onclick: createSegments,
+                                      html: `${icon("layers", { size: 14 })}<span>Create segments</span>` });
+  const segResults = el("div", { class: "landing__recent" });
+  const segFields = {
+    duration: field("seconds", segSeconds),
+    meters: field("metres", segMeters),
+    speed: field("avg km/h", segSpeed),
+    count: field("segments", segCount),
+  };
+  const segHint = el("p", { class: "hint" });
+  segments.body.append(
+    field("split", segMode),
+    segFields.duration, segFields.meters, segFields.speed, segFields.count,
+    segHint,
+    el("div", { class: "field", style: "margin-bottom:0" }, segCreateBtn),
+    segResults);
+  segMode.addEventListener("change", updateSegFields);
 
   const orientation = InspectorSection("Rig orientation", { id: "cap-orient", open: false });
   const orientYaw = el("input", { type: "number", value: 0, step: 1 });
@@ -149,8 +193,12 @@ export function CaptureStage(ctx) {
   const previewImage = el("img", { style: "width:100%;border-radius:5px;display:none" });
   previewSection.body.append(previewImage);
 
-  for (const part of [source, rigSection, editor, image, occluder, output,
-                      orientation, previewSection]) {
+  // Occluder and Rig-orientation sections are intentionally not mounted: masking now
+  // lives in its own flow and every camera shares one global FOV/shape. Their element
+  // objects stay constructed (referenced by legacy handlers with harmless defaults) but
+  // are never shown.
+  for (const part of [source, rigSection, editor, image, output,
+                      segments, previewSection]) {
     inspector.append(part.section);
   }
 
@@ -161,7 +209,77 @@ export function CaptureStage(ctx) {
     onCancel: () => ctx.api.jobs.cancel("capture").then(ctx.pokeJobs),
   });
 
-  const panel = el("div", { class: "stage-panel" }, workspace, inspector, actionBar.bar);
+  // ── landing (empty state) ────────────────────────────────────────────
+  // The way into the whole pipeline, shown until a source is loaded: a video (which
+  // creates a project beside it) or an existing project. This is the app's front door.
+  const recentList = el("div", { class: "landing__recent" });
+  const dropZone = el("div", { class: "landing__drop" },
+    el("div", { class: "landing__icon", html: icon("camera", { size: 40 }) }),
+    el("div", { class: "landing__title" }, "Load a 360° video to begin"),
+    el("div", { class: "landing__hint" }, "Drag a video here, or"),
+    el("div", { class: "landing__actions" },
+      el("button", { class: "btn btn--primary", type: "button", onclick: browse,
+                     html: `${icon("folder", { size: 14 })}<span>Browse…</span>` }),
+      el("button", { class: "btn", type: "button", onclick: () => ctx.openProject(),
+                     html: `${icon("layers", { size: 14 })}<span>Open project…</span>` })),
+    el("p", { class: "landing__note" },
+      "A project folder is created next to the video; opening the same video later resumes it."));
+
+  const landing = el("div", { class: "landing" },
+    dropZone,
+    el("div", { class: "landing__side" },
+      el("div", { class: "landing__side-title" }, "Recent projects"),
+      recentList));
+
+  dropZone.addEventListener("dragover", (event) => {
+    event.preventDefault(); dropZone.classList.add("landing__drop--over");
+  });
+  dropZone.addEventListener("dragleave", () => dropZone.classList.remove("landing__drop--over"));
+  dropZone.addEventListener("drop", (event) => {
+    event.preventDefault(); dropZone.classList.remove("landing__drop--over");
+    const file = event.dataTransfer.files && event.dataTransfer.files[0];
+    // Browsers hand over the bytes but not the path, and the server extracts by path --
+    // so a drop cannot be resolved directly. `file.path` exists only in Electron-like
+    // hosts; when it does not, fall back to the native picker so the drop still leads in.
+    const path = file && file.path;
+    if (path) { pathField.value = path; loadMedia(); }
+    else {
+      ctx.flash("A browser drop does not expose the file path — pick it in the dialog.",
+                { level: "info" });
+      browse();
+    }
+  });
+
+  const panel = el("div", { class: "stage-panel" },
+                    landing, workspace, inspector, actionBar.bar);
+
+  async function refreshLanding() {
+    try {
+      const { recent } = await ctx.api.get("/api/recent");
+      recentList.replaceChildren();
+      if (!recent.length) {
+        recentList.append(el("p", { class: "hint" }, "No recent projects yet."));
+        return;
+      }
+      for (const entry of recent) {
+        recentList.append(el("button", {
+          class: `landing__recent-item${entry.exists ? "" : " landing__recent-item--missing"}`,
+          type: "button", title: entry.root,
+          onclick: entry.exists ? () => ctx.openRecent(entry.root) : undefined,
+        },
+          el("span", { class: "landing__recent-name" }, entry.name || entry.root),
+          el("span", { class: "landing__recent-path" }, entry.exists ? entry.root : "missing")));
+      }
+    } catch { /* the list is a convenience; a failure just leaves it empty */ }
+  }
+
+  function updateLanding() {
+    // The front door is for when nothing is open at all. Once a project exists you are
+    // past it -- show the editor even before its first frame has finished decoding.
+    const empty = !local.media && !ctx.state.project;
+    panel.classList.toggle("stage-panel--empty", empty);
+    if (empty) refreshLanding();
+  }
 
   // ── helpers ──────────────────────────────────────────────────────────
 
@@ -400,10 +518,19 @@ export function CaptureStage(ctx) {
     const camera = current();
     if (!camera) return;
     camName.value = camera.name;
-    camYaw.value = camera.yaw;
-    camPitch.value = camera.pitch;
-    camFov.value = camera.h_fov;
 
+    const size = local.sizes[camera.name];
+    camSize.textContent = size
+      ? `writes ${size[0]}×${size[1]} — native detail for a ${Math.round(camera.h_fov)}° view`
+      : "";
+  }
+
+  // Global FOV/shape controls reflect the rig (all cameras share them), so sync them
+  // whenever the rig is replaced -- a preset, a loaded project, boot.
+  function syncRigControls() {
+    const camera = local.rig && local.rig.cameras[0];
+    if (!camera) return;
+    camFov.value = camera.h_fov;
     const ratio = camera.h_fov / camera.v_fov;
     let best = "1.3333", diff = 9;
     for (const option of camShape.options) {
@@ -411,11 +538,17 @@ export function CaptureStage(ctx) {
       if (delta < diff) { diff = delta; best = option.value; }
     }
     camShape.value = best;
+  }
 
-    const size = local.sizes[camera.name];
-    camSize.textContent = size
-      ? `writes ${size[0]}×${size[1]} — native detail for a ${Math.round(camera.h_fov)}° view`
-      : "";
+  function applyGlobalFovShape() {
+    if (!local.rig) return;
+    const h = camFov.value;
+    const ratio = parseFloat(camShape.value) || 4 / 3;
+    for (const camera of local.rig.cameras) {
+      camera.h_fov = h;
+      camera.v_fov = Math.min(h / ratio, 179);
+    }
+    refresh();
   }
 
   function select(index) {
@@ -452,11 +585,61 @@ export function CaptureStage(ctx) {
   }
 
   function applyPreset() {
+    const chosen = local.presets[presetSelect.value];
+    if (!chosen) return;
     const grade = local.rig ? local.rig.grade : null;
-    local.rig = structuredClone(local.presets[presetSelect.value]);
+    local.rig = structuredClone(chosen);
     if (grade) local.rig.grade = grade;      // a preset changes cameras, not the look
     local.selected = 0;
+    syncRigControls();
     refresh(); previewCamera();
+  }
+
+  function updatePresetButtons() {
+    deletePresetBtn.disabled = !local.userPresets.has(presetSelect.value);
+  }
+
+  // Built-in and saved presets, grouped in the dropdown. `keep` is the option to
+  // reselect after a rebuild -- the one just saved, or whatever was already showing.
+  async function loadPresets(keep) {
+    const data = await ctx.api.get("/api/presets");
+    local.presets = data.presets;
+    local.userPresets = new Set(data.user || []);
+    const target = local.presets[keep] ? keep : (presetSelect.value || "ring");
+
+    const builtin = el("optgroup", { label: "Built-in" });
+    const saved = el("optgroup", { label: "Saved" });
+    for (const name of Object.keys(data.presets)) {
+      (local.userPresets.has(name) ? saved : builtin).append(el("option", { value: name }, name));
+    }
+    presetSelect.replaceChildren(builtin);
+    if (saved.children.length) presetSelect.append(saved);
+    presetSelect.value = local.presets[target] ? target : "ring";
+    updatePresetButtons();
+  }
+
+  async function savePreset() {
+    const name = presetName.value.trim();
+    if (!name) { ctx.flash("Name the preset before saving.", { level: "warn" }); return; }
+    readSettings();
+    try {
+      const data = await ctx.api.post("/api/preset/save", { name, rig: local.rig });
+      local.presets = data.presets;
+      local.userPresets = new Set(data.user || []);
+      presetName.value = "";
+      await loadPresets(name);
+      ctx.flash(`Saved preset “${name}”.`);
+    } catch (error) { ctx.report(error); }
+  }
+
+  async function deletePreset() {
+    const name = presetSelect.value;
+    if (!local.userPresets.has(name)) return;
+    try {
+      await ctx.api.post("/api/preset/delete", { name });
+      await loadPresets("ring");
+      ctx.flash(`Deleted preset “${name}”.`);
+    } catch (error) { ctx.report(error); }
   }
 
   // ── grade ────────────────────────────────────────────────────────────
@@ -606,12 +789,77 @@ export function CaptureStage(ctx) {
     } catch (error) { ctx.report(error); }
   }
 
-  async function browseOut() {
+  // ── segments ─────────────────────────────────────────────────────────
+
+  const SEG_SHOW = {
+    off: [],
+    duration: ["duration"],
+    "motion-distance": ["meters", "speed"],
+    "motion-count": ["count"],
+    gpx: ["meters"],
+  };
+  const SEG_HINT = {
+    off: "The whole clip becomes one project.",
+    duration: "Cut every N seconds.",
+    "motion-distance": "Estimates forward travel from the video (needs the ML extra). "
+      + "Average speed turns motion into approximate metres.",
+    "motion-count": "Splits into equal-travel pieces from video motion (needs ML). "
+      + "No speed needed — distances are approximate.",
+    gpx: "Cuts by true metres along a <clip>.gpx track placed beside the video.",
+  };
+
+  function updateSegFields() {
+    const show = new Set(SEG_SHOW[segMode.value] || []);
+    for (const [key, node] of Object.entries(segFields)) node.hidden = !show.has(key);
+    segHint.textContent = SEG_HINT[segMode.value] || "";
+    segCreateBtn.hidden = segMode.value === "off";
+  }
+
+  async function createSegments() {
+    if (!local.media) { ctx.flash("Load a source first.", { level: "warn" }); return; }
+    const mode = segMode.value;
+    const payload = { path: local.media.path };
+    if (mode === "duration") {
+      payload.mode = "duration"; payload.seconds = parseFloat(segSeconds.value) || 60;
+    } else if (mode === "motion-distance") {
+      const speed = parseFloat(segSpeed.value) || 0;
+      if (!speed) { ctx.flash("Enter an average speed for metre-based segments.",
+                              { level: "warn" }); return; }
+      payload.mode = "motion";
+      payload.meters = parseFloat(segMeters.value) || 500;
+      payload.speed_kph = speed;
+    } else if (mode === "motion-count") {
+      payload.mode = "motion"; payload.count = parseInt(segCount.value, 10) || 2;
+    } else if (mode === "gpx") {
+      payload.mode = "gpx"; payload.meters = parseFloat(segMeters.value) || 500;
+    } else { return; }
+
+    segCreateBtn.disabled = true;
+    segCreateBtn.querySelector("span").textContent = "Analysing…";
     try {
-      const paths = await ctx.api.pick("directory", "Choose an output folder", "media",
-                                       outDir.value);
-      if (paths.length) outDir.value = paths[0];
+      const { segments: made } = await ctx.api.post("/api/segment", payload);
+      renderSegments(made);
+      ctx.flash(`Created ${made.length} segment project${made.length === 1 ? "" : "s"}.`);
     } catch (error) { ctx.report(error); }
+    finally {
+      segCreateBtn.disabled = false;
+      segCreateBtn.querySelector("span").textContent = "Create segments";
+    }
+  }
+
+  function renderSegments(made) {
+    segResults.replaceChildren();
+    for (const seg of made) {
+      const span = `${seg.start.toFixed(1)}–${seg.end.toFixed(1)}s`;
+      const dist = seg.distance != null
+        ? `  ·  ${seg.approximate ? "≈" : ""}${Math.round(seg.distance)} m` : "";
+      segResults.append(el("button", {
+        class: "landing__recent-item", type: "button", title: seg.root,
+        onclick: () => ctx.openRecent(seg.root),
+      },
+        el("span", { class: "landing__recent-name" }, seg.name),
+        el("span", { class: "landing__recent-path" }, span + dist)));
+    }
   }
 
   async function loadMedia() {
@@ -626,17 +874,36 @@ export function CaptureStage(ctx) {
       timeSlider.max = data.media.is_video
         ? Math.max(data.media.duration - 0.1, 0) : 0;
 
-      if (!outDir.value) {
-        const separator = data.media.path.includes("\\") ? "\\" : "/";
-        outDir.value = data.media.path.slice(0, data.media.path.lastIndexOf(separator))
-          + separator + "dataset";
-      }
+      // Opening a source is opening its project. This resolves the output folder too,
+      // so there is nothing for the user to pick.
+      await ensureProject(data.media.path);
 
       const img = new Image();
       img.onload = () => { local.image = img; fitCanvas(); };
       img.src = data.url;
 
+      updateLanding();
       refresh(); previewCamera(); refreshCoverage();
+    } catch (error) { ctx.report(error); }
+  }
+
+  function samePath(a, b) {
+    const norm = (p) => String(p).replace(/\\/g, "/").toLowerCase().replace(/\/+$/, "");
+    return norm(a) === norm(b);
+  }
+
+  async function ensureProject(path) {
+    // Create a project in a folder beside the video, or resume one already there. Skip
+    // if the open project already owns this source, so re-seeking does not re-create it.
+    const project = ctx.state.project;
+    if (project && (project.sources || []).some((s) => samePath(s, path))) return;
+    try {
+      const { project: ensured } = await ctx.api.post("/api/project/for-source", {
+        path, rig: local.rig,
+        frames: { mode: frameMode.value, value: parseFloat(frameValue.value) || 2 },
+        output: { mask_mode: maskMode.value },
+      });
+      ctx.applyProject(ensured, { keepMedia: true });
     } catch (error) { ctx.report(error); }
   }
 
@@ -696,6 +963,7 @@ export function CaptureStage(ctx) {
     readSettings();
     renderCameras(); renderEditor(); draw(); estimateImages();
     if (!revalidate) return;
+    ctx.autosave();  // settings changed -> fold it into project.json (debounced)
     clearTimeout(validateTimer);
     validateTimer = setTimeout(async () => {
       try {
@@ -726,22 +994,10 @@ export function CaptureStage(ctx) {
   camName.addEventListener("change", () => {
     const camera = current(); if (camera) { camera.name = camName.value; refresh(); }
   });
-  for (const [control, key] of [[camYaw, "yaw"], [camPitch, "pitch"], [camFov, "h_fov"]]) {
-    control.input.addEventListener("input", () => {
-      const camera = current(); if (!camera) return;
-      camera[key] = control.value;
-      if (key === "h_fov") {
-        camera.v_fov = Math.min(control.value / (parseFloat(camShape.value) || 4 / 3), 179);
-      }
-      refresh();
-    });
-    control.input.addEventListener("change", previewCamera);
-  }
-  camShape.addEventListener("change", () => {
-    const camera = current(); if (!camera) return;
-    camera.v_fov = Math.min(camera.h_fov / parseFloat(camShape.value), 179);
-    refresh(); previewCamera();
-  });
+  // FOV/shape are global: a change rewrites every camera, not just the selected one.
+  camFov.input.addEventListener("input", applyGlobalFovShape);
+  camFov.input.addEventListener("change", previewCamera);
+  camShape.addEventListener("change", () => { applyGlobalFovShape(); previewCamera(); });
   for (const control of [outFormat, outQuality, orientYaw, orientPitch, frameValue]) {
     control.addEventListener("change", () => refresh());
   }
@@ -756,25 +1012,23 @@ export function CaptureStage(ctx) {
 
   (async function init() {
     try {
-      const data = await ctx.api.get("/api/presets");
-      local.presets = data.presets;
-      for (const name of Object.keys(data.presets)) {
-        presetSelect.append(el("option", { value: name }, name));
-      }
-      presetSelect.value = "ring";
-      local.rig = structuredClone(data.presets.ring);
+      await loadPresets("ring");
+      local.rig = structuredClone(local.presets.ring);
       outFormat.value = local.rig.output.format;
       outQuality.value = local.rig.output.quality;
       writeGrade(local.rig.grade);
+      syncRigControls();
       refresh(false);
       fitCanvas();
+      updateLanding();
+      updateSegFields();
     } catch (error) { ctx.report(error); }
   })();
 
   return {
     panel,
     onJobs: (job) => actionBar.render(job),
-    onEnter: () => fitCanvas(),
+    onEnter: () => { updateLanding(); fitCanvas(); },
     applyProject(project, { keepMedia } = {}) {
       if (!project) return;
       local.rig = project.rig;
@@ -794,7 +1048,8 @@ export function CaptureStage(ctx) {
       nadirSlider.value = local.nadir;
       occluder.setNote(local.nadir ? `below −${local.nadir}°` : "no cone");
 
-      refresh(); refreshCoverage();
+      syncRigControls();
+      refresh(); refreshCoverage(); updateLanding();
       if (!keepMedia && project.sources && project.sources.length) {
         pathField.value = project.sources[0];
         loadMedia();

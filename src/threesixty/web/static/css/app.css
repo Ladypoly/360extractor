@@ -163,6 +163,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
 
 /* ── controls ────────────────────────────────────────────────────────── */
 
+/* A flex/grid display would otherwise beat the [hidden] attribute; make hidden win so
+   toggling `node.hidden` actually hides fields (e.g. the Segments options per mode). */
+[hidden] { display: none !important; }
 .field { display: flex; align-items: center; gap: var(--s2); margin-bottom: var(--s2); }
 .field > label { flex: 0 0 66px; color: var(--text-dim); font-size: var(--fs-meta); }
 .field > :not(label) { flex: 1; min-width: 0; }
@@ -408,6 +411,93 @@ dialog::backdrop { background: rgba(0, 0, 0, .55); }
 .tool-row__path {
   flex: 1; min-width: 0; color: var(--text-faint);
   font: 11px var(--mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* ── capture landing (empty state) ───────────────────────────────────── */
+
+.landing { display: none; }
+.stage-panel--empty {
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr;
+  grid-template-areas: "landing";
+}
+.stage-panel--empty > .workspace,
+.stage-panel--empty > .inspector,
+.stage-panel--empty > .actionbar { display: none; }
+.stage-panel--empty > .landing {
+  grid-area: landing;
+  display: flex; gap: var(--s8); align-items: stretch; justify-content: center;
+  padding: var(--s8); overflow-y: auto;
+  background: var(--workspace-bg);
+}
+
+.landing__drop {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  text-align: center; gap: var(--s2);
+  width: min(560px, 60%); padding: var(--s8) var(--s6);
+  border: 1.5px dashed var(--border-strong); border-radius: var(--radius-panel);
+  background: var(--panel-bg); transition: border-color 120ms, background 120ms;
+}
+.landing__drop--over { border-color: var(--accent); background: var(--accent-tint); }
+.landing__icon { color: var(--text-faint); }
+.landing__title { color: var(--text); font-size: 16px; font-weight: 600; }
+.landing__hint { color: var(--text-dim); font-size: var(--fs-body); }
+.landing__actions { display: flex; gap: var(--s2); margin-top: var(--s3); }
+.landing__note {
+  margin-top: var(--s4); max-width: 40ch;
+  color: var(--text-faint); font-size: var(--fs-meta); line-height: 1.5;
+}
+
+.landing__side { width: 300px; min-width: 220px; display: flex; flex-direction: column; }
+.landing__side-title {
+  color: var(--text-dim); font-size: var(--fs-head); text-transform: uppercase;
+  letter-spacing: 0.04em; margin-bottom: var(--s3);
+}
+.landing__recent { display: flex; flex-direction: column; gap: var(--s1); }
+.landing__recent-item {
+  display: flex; flex-direction: column; gap: 1px; width: 100%;
+  padding: var(--s2) var(--s3); background: var(--panel-bg);
+  border: 1px solid var(--border); border-radius: var(--radius-control);
+  text-align: left; cursor: pointer; color: var(--text);
+}
+.landing__recent-item:hover { background: var(--control-hover); border-color: var(--border-strong); }
+.landing__recent-item--missing { cursor: default; opacity: 0.5; }
+.landing__recent-item--missing:hover { background: var(--panel-bg); border-color: var(--border); }
+.landing__recent-name { font-size: var(--fs-body); }
+.landing__recent-path {
+  font: 11px var(--mono); color: var(--text-faint);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+@media (max-width: 900px) {
+  .stage-panel--empty > .landing { flex-direction: column; align-items: center; }
+  .landing__drop { width: min(560px, 90%); }
+  .landing__side { width: min(560px, 90%); }
+}
+
+/* ── recent-projects menu ────────────────────────────────────────────── */
+
+.menu-anchor { position: relative; display: inline-flex; }
+.menu {
+  position: absolute; top: calc(100% + var(--s1)); right: 0; z-index: 40;
+  min-width: 260px; max-width: 380px; max-height: 60vh; overflow-y: auto;
+  padding: var(--s1); background: var(--panel-raised);
+  border: 1px solid var(--border-strong); border-radius: var(--radius-panel);
+  box-shadow: var(--shadow-panel);
+}
+.menu__empty { padding: var(--s2) var(--s3); color: var(--text-faint); font-size: var(--fs-meta); }
+.menu__item {
+  display: flex; flex-direction: column; gap: 1px; width: 100%;
+  padding: var(--s2) var(--s3); background: none; border: 0; border-radius: var(--radius-control);
+  text-align: left; cursor: pointer; color: var(--text);
+}
+.menu__item:hover { background: var(--control-hover); }
+.menu__item--missing { cursor: default; opacity: 0.55; }
+.menu__item--missing:hover { background: none; }
+.menu__title { font-size: var(--fs-body); }
+.menu__path {
+  font: 11px var(--mono); color: var(--text-faint);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
