@@ -35,7 +35,7 @@ from ..project import (
     Project,
     ProjectError,
 )
-from .. import motion, recent, segment, userpresets
+from .. import cameras, frames, motion, recent, segment, userpresets
 from ..rig import PRESETS, Camera, Grade, Orientation, Output, Rig, RigError
 
 #: Occluder kinds a global rig preset may carry. `nadir_cone`/`zenith_cone` are angles
@@ -274,6 +274,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.api_preset_delete(payload))
             elif route.path == "/api/extract":
                 self._json(self.api_extract(payload))
+            elif route.path == "/api/frames/extract":
+                self._json(self.api_frames_extract(payload))
+            elif route.path == "/api/cameras/generate":
+                self._json(self.api_cameras_generate(payload))
             elif route.path == "/api/job/cancel":
                 job = self.session.jobs[payload["stage"]]
                 job.cancel.set()
@@ -929,6 +933,72 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError(f"{name!r} is a built-in preset and cannot be deleted")
         userpresets.delete(name)
         return self._presets_payload()
+
+    def api_frames_extract(self, payload: dict) -> dict:
+        """Stage A: pull the chosen equirect frames into the project working set.
+
+        This is the first half of the two-stage capture -- decode + frame thinning, no
+        rig. The rig and masking are applied later by camera generation, so the frames
+        can be re-rigged without decoding the video again.
+        """
+        project = self._open_project()
+        sources = project.resolved_sources()
+        if not sources:
+            raise ValueError("this project has no source to extract frames from")
+        selection = FrameSelection(
+            mode=payload.get("mode", "sharp"), value=float(payload.get("value", 2.0)),
+            start=payload.get("start"), end=payload.get("end"))
+        selection.validate()
+        session = self.session
+        job = self.session.jobs["capture"]
+
+        def work(running_job) -> dict:
+            info = probe_media(sources[0], session.ffmpeg)
+            result = frames.extract_frames(
+                session.ffmpeg, info, selection, project.root,
+                on_progress=lambda frac, n, _t: running_job.progress(frac, f"frame {n}"),
+                on_analysis=lambda note: running_job.log(note),
+                should_cancel=running_job.cancel.is_set)
+            project.frames = FrameSettings(
+                mode=selection.mode, value=selection.value,
+                start=selection.start, end=selection.end)
+            # Frame extraction invalidates any cameras already generated from older frames.
+            project.stages.pop("extract", None)
+            project.save()
+            return {"frames": result.count, "clip": result.clip,
+                    "summary": f"{result.count} frames extracted"}
+
+        job.start(work, name="extracting frames")
+        return {"started": True, "stage": "capture"}
+
+    def api_cameras_generate(self, payload: dict) -> dict:
+        """Stage B: project the extracted frames through the rig into camera tiles."""
+        project = self._open_project()
+        sources = project.resolved_sources()
+        if not sources:
+            raise ValueError("this project has no source")
+        if "rig" in payload:
+            project.rig = rig_from_payload(payload["rig"])
+        clip = safe_stem(sources[0].stem)
+        frames_directory = frames.frames_dir(project.root, clip)
+        if not frames_directory.exists():
+            raise ValueError("extract frames before generating cameras")
+        session = self.session
+        rig = project.rig
+        job = self.session.jobs["capture"]
+
+        def work(running_job) -> dict:
+            result = cameras.generate_cameras(
+                session.ffmpeg, frames_directory, rig, project.root, clip=clip,
+                on_progress=lambda frac, n, _t: running_job.progress(frac, f"frame {n}"),
+                should_cancel=running_job.cancel.is_set)
+            project.mark_done("extract", images=result.images_written)
+            project.save()
+            return {"images": result.images_written,
+                    "summary": f"{result.images_written} camera images"}
+
+        job.start(work, name="generating cameras")
+        return {"started": True, "stage": "capture"}
 
     def api_extract(self, payload: dict) -> dict:
         job = self.session.jobs["capture"]

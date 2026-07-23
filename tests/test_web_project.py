@@ -235,6 +235,55 @@ class TestRecentProjects:
         assert body["recent"] == []
 
 
+class TestTwoStageCapture:
+    def _wait(self, base, timeout=120):
+        import time
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            _, snap = post(base, "/api/job/status", {"stage": "capture"})
+            if snap.get("state") not in ("running", "pending"):
+                return snap
+            time.sleep(0.2)
+        raise AssertionError("capture job did not finish in time")
+
+    def test_extract_frames_then_generate_cameras(self, make_ui, tmp_path, equirect_clip):
+        source = tmp_path / "drive.mp4"
+        shutil.copy(equirect_clip, source)
+        project = Project.create(tmp_path / "proj", sources=[str(source)])
+        base, _ = make_ui(project)
+
+        status, body = post(base, "/api/frames/extract", {"mode": "fps", "value": 5})
+        assert status == 200 and body["started"]
+        snap = self._wait(base)
+        assert snap["state"] == "done", snap
+        assert snap["result"]["frames"] >= 1
+        assert (tmp_path / "proj" / "frames" / "drive").is_dir()
+
+        rig = {"cameras": [{"name": f"c{i}", "yaw": i * 180 - 90, "pitch": 0,
+                            "h_fov": 90, "v_fov": 90} for i in range(2)],
+               "output": {"width": 160, "height": 160, "format": "jpg"}}
+        status, body = post(base, "/api/cameras/generate", {"rig": rig})
+        assert status == 200 and body["started"]
+        snap = self._wait(base)
+        assert snap["state"] == "done", snap
+        assert snap["result"]["images"] > 0
+
+        reopened = Project.load(tmp_path / "proj")
+        assert reopened.status("extract") == "done"
+        for i in range(2):
+            assert (tmp_path / "proj" / "images" / "drive" / f"c{i}").is_dir()
+
+    def test_generate_before_extract_is_a_clear_error(self, make_ui, tmp_path,
+                                                      equirect_clip):
+        source = tmp_path / "drive.mp4"
+        shutil.copy(equirect_clip, source)
+        project = Project.create(tmp_path / "proj", sources=[str(source)])
+        base, _ = make_ui(project)
+        status, body = post(base, "/api/cameras/generate", {})
+        assert status == 400
+        assert "extract frames" in body["error"]
+
+
 class TestSegmentEndpoint:
     def _drive(self, tmp_path, equirect_clip):
         source = tmp_path / "drive.mp4"
