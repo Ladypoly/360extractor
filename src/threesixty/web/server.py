@@ -178,6 +178,18 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._file(target, _static_type(target.name) or "application/octet-stream")
 
+    def _serve_project_frame(self, relative: str) -> None:
+        """Serve an extracted equirect frame so the Capture canvas can show it."""
+        project = self.session.project
+        if project is None:
+            self._json({"error": "no project is open"}, 404)
+            return
+        target = self._safe_join(project.root / "frames", relative)
+        if target is None or not target.exists():
+            self._json({"error": f"not found: {relative}"}, 404)
+            return
+        self._file(target, "image/jpeg")
+
     def _serve_project_file(self, relative: str) -> None:
         """Serve a file from the open project, so the viewer can fetch a .ply."""
         project = self.session.project
@@ -210,6 +222,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._serve_viewer(route.path[len("/viewer/"):])
             elif route.path.startswith("/splat/"):
                 self._serve_project_file(route.path[len("/splat/"):])
+            elif route.path.startswith("/frames/"):
+                self._serve_project_frame(route.path[len("/frames/"):])
             elif route.path.startswith("/preview/"):
                 # Before the generic static handler: these are generated files in the
                 # session cache, and `.jpg` would otherwise be looked for in static/.
@@ -243,6 +257,8 @@ class Handler(BaseHTTPRequestHandler):
                             if project else None})
             elif route.path == "/api/recent":
                 self._json({"recent": recent.entries()})
+            elif route.path == "/api/frames/list":
+                self._json(self.api_frames_list())
             elif route.path.startswith("/preview/"):
                 name = Path(route.path).name
                 self._file(self.session.cache / name, "image/jpeg")
@@ -933,6 +949,19 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError(f"{name!r} is a built-in preset and cannot be deleted")
         userpresets.delete(name)
         return self._presets_payload()
+
+    def api_frames_list(self) -> dict:
+        """The extracted equirect frames for the open project, for the canvas viewer."""
+        project = self.session.project
+        if project is None:
+            return {"clip": None, "frames": []}
+        sources = project.resolved_sources()
+        if not sources:
+            return {"clip": None, "frames": []}
+        clip = safe_stem(sources[0].stem)
+        directory = frames.frames_dir(project.root, clip)
+        names = sorted(p.name for p in directory.glob("*.jpg")) if directory.exists() else []
+        return {"clip": clip, "frames": names}
 
     def api_frames_extract(self, payload: dict) -> dict:
         """Stage A: pull the chosen equirect frames into the project working set.

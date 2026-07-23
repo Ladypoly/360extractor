@@ -273,6 +273,24 @@ class TestTwoStageCapture:
         for i in range(2):
             assert (tmp_path / "proj" / "images" / "drive" / f"c{i}").is_dir()
 
+    def test_frames_list_and_serving(self, make_ui, tmp_path, equirect_clip):
+        source = tmp_path / "drive.mp4"
+        shutil.copy(equirect_clip, source)
+        project = Project.create(tmp_path / "proj", sources=[str(source)])
+        base, _ = make_ui(project)
+
+        assert get(base, "/api/frames/list")["frames"] == []      # none yet
+
+        post(base, "/api/frames/extract", {"mode": "fps", "value": 5})
+        self._wait(base)
+        listing = get(base, "/api/frames/list")
+        assert listing["clip"] == "drive" and len(listing["frames"]) >= 1
+
+        with urllib.request.urlopen(
+                f"{base}/frames/drive/{listing['frames'][0]}", timeout=30) as response:
+            assert response.status == 200
+            assert response.read(3) == b"\xff\xd8\xff"            # JPEG magic
+
     def test_generate_before_extract_is_a_clear_error(self, make_ui, tmp_path,
                                                       equirect_clip):
         source = tmp_path / "drive.mp4"
