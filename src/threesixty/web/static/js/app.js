@@ -163,6 +163,11 @@ export function applyProject(project, { keepMedia = false } = {}) {
     if (stage.applyProject) stage.applyProject(project, { keepMedia });
   }
   refreshJobs();
+  // Jump to the stage this project was last on (a freshly created one has none, so it
+  // stays where the user is -- Start, mid-import).
+  const perProject = projectStageKey(project);
+  const remembered = perProject ? localStorage.getItem(perProject) : null;
+  goTo(remembered || state.active);
 }
 
 // ── system status ──────────────────────────────────────────────────────
@@ -212,9 +217,16 @@ export function pokeJobs() {
 
 // ── navigation ─────────────────────────────────────────────────────────
 
+function projectStageKey(project) {
+  return project && project.root ? `stage:${project.root}` : null;
+}
+
 export function goTo(key) {
   state.active = key;
   localStorage.setItem("stage", key);
+  // Remember per project, so reopening one lands back where it was left.
+  const perProject = projectStageKey(state.project);
+  if (perProject) localStorage.setItem(perProject, key);
   for (const stage of STAGES) {
     const panel = document.getElementById(`stage-panel-${stage.key}`);
     if (panel) panel.hidden = stage.key !== key;
@@ -293,13 +305,12 @@ async function boot() {
 
   try {
     const { project } = await api.get("/api/project");
+    // applyProject navigates to the project's remembered stage; with nothing open, land
+    // on Start, which owns project selection and import.
     if (project) applyProject(project);
-    // With nothing open, the last-used stage is meaningless. Start at the Start tab,
-    // which owns project selection and import.
-    else state.active = "start";
-  } catch { state.active = "start"; }
+    else goTo("start");
+  } catch { goTo("start"); }
 
-  goTo(state.active);
   refreshJobs();
 }
 
