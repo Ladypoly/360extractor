@@ -174,8 +174,7 @@ export function CaptureStage(ctx) {
     field("folder", outDir),
     el("p", { class: "hint" }, "Created automatically beside the source; everything the "
       + "project produces lands here and saves as you go."),
-    el("div", { class: "pair" }, field("format", outFormat), field("quality", outQuality)),
-    field("frames", frameMode), field("rate", frameValue), estimate);
+    el("div", { class: "pair" }, field("format", outFormat), field("quality", outQuality)));
 
   // ── segments ─────────────────────────────────────────────────────────
   // Split a long drive into independent projects: a kilometres-long clip reconstructs
@@ -278,8 +277,43 @@ export function CaptureStage(ctx) {
     }
   });
 
+  // Extract-frames dialog: opens on load (and from the primary button) to choose how the
+  // source is sampled into the working set before the rig ever comes up.
+  const dlgInfo = el("p", { class: "hint" });
+  const framesDialog = el("dialog", { id: "frames-dialog", "aria-labelledby": "frames-title" },
+    el("div", { class: "dialog__head", id: "frames-title" }, "Extract frames"),
+    el("div", { class: "dialog__body" },
+      dlgInfo,
+      field("frames", frameMode),
+      field("rate", frameValue),
+      estimate),
+    el("div", { class: "dialog__foot" },
+      el("button", { class: "btn", type: "button", onclick: () => framesDialog.close() }, "Cancel"),
+      el("button", { class: "btn btn--primary", type: "button", onclick: confirmFramesDialog,
+                     html: `${icon("film", { size: 14 })}<span>Extract frames</span>` })));
+
   const panel = el("div", { class: "stage-panel" },
-                    landing, workspace, inspector, actionBar.bar);
+                    landing, workspace, inspector, actionBar.bar, framesDialog);
+
+  function updateDialogInfo() {
+    const media = local.media;
+    if (!media) { dlgInfo.textContent = ""; return; }
+    const bits = [`${media.width}×${media.height}`];
+    if (media.is_video) bits.push(`${media.duration.toFixed(1)}s`, `${media.fps} fps`);
+    dlgInfo.textContent = bits.join("  ·  ");
+  }
+
+  function openFramesDialog() {
+    if (!local.media) { ctx.flash("Load a source first.", { level: "warn" }); return; }
+    updateDialogInfo();
+    estimateImages();
+    if (!framesDialog.open) framesDialog.showModal();
+  }
+
+  async function confirmFramesDialog() {
+    framesDialog.close();
+    await extractFrames();
+  }
 
   async function refreshLanding() {
     try {
@@ -861,6 +895,8 @@ export function CaptureStage(ctx) {
       if (!paths.length) return;
       pathField.value = paths[0];
       await loadMedia();
+      // Loading a source opens the extract prompt, unless this project already has frames.
+      if (!local.frames.length) openFramesDialog();
     } catch (error) { ctx.report(error); }
   }
 
@@ -961,7 +997,7 @@ export function CaptureStage(ctx) {
       refresh(); previewCamera(); refreshCoverage();
       // If this project already has extracted frames, switch the canvas to them and set
       // the button to Generate cameras; otherwise the preview stays and it reads Extract.
-      refreshFrames();
+      await refreshFrames();
     } catch (error) { ctx.report(error); }
   }
 
@@ -1067,7 +1103,7 @@ export function CaptureStage(ctx) {
   async function runCapture() {
     if (!local.media) { ctx.flash("Load a source first.", { level: "warn" }); return; }
     readSettings();
-    if (!local.frames.length) return extractFrames();
+    if (!local.frames.length) return openFramesDialog();
     return generateCameras();
   }
 

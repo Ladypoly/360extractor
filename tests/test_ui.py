@@ -272,7 +272,10 @@ class TestJobsAcrossStages:
         """Leaving a stage must not hide, or stop, its work."""
         page.click("#stage-tab-capture")
         page.wait_for_timeout(300)
+        # The primary opens the extract-frames dialog; confirm it to start the job.
         page.click("#stage-panel-capture .actionbar .btn--primary")
+        page.wait_for_selector("#frames-dialog[open]")
+        page.click("#frames-dialog .btn--primary")
 
         # Move away immediately; the pipeline must still report it. Reconstruct is
         # legitimately disabled here (frame extraction hasn't produced camera images
