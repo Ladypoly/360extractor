@@ -44,6 +44,25 @@ def test_missing_points_is_empty_not_an_error(tmp_path):
     assert positions.shape == (0, 3) and colors.shape == (0, 3)
 
 
+def test_truncated_file_stops_at_the_last_complete_record(tmp_path):
+    """The live view polls this while COLMAP writes it -- a half-written tail must not
+    crash (giant track read / MemoryError) but stop cleanly."""
+    path = tmp_path / "points3D.bin"
+    with open(path, "wb") as handle:
+        handle.write(struct.pack("<Q", 5))                 # header claims 5 points
+        for i in range(2):                                 # only 2 are fully written
+            handle.write(struct.pack("<Q", i + 1))
+            handle.write(struct.pack("<ddd", 1.0, 2.0, 3.0))
+            handle.write(struct.pack("<BBB", 1, 2, 3))
+            handle.write(struct.pack("<d", 0.1))
+            handle.write(struct.pack("<Q", 1))
+            handle.write(struct.pack("<ii", 1, 0))
+        handle.write(b"\x99\x99\x99")                      # partial third record
+
+    positions, colors = read_points(tmp_path)
+    assert len(positions) == 2 and len(colors) == 2
+
+
 def test_limit_subsamples(tmp_path):
     pts = [(float(i), 0.0, 0.0, 0, 0, 0) for i in range(100)]
     _write_points_binary(tmp_path / "points3D.bin", pts)

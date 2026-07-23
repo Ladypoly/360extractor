@@ -1133,10 +1133,16 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        import numpy as np
         from ..colmap.model import read_points
 
-        positions, colors = read_points(model_dir, limit=200_000)
+        try:
+            positions, colors = read_points(model_dir, limit=200_000)
+        except Exception:
+            # The model may be mid-write; skip this poll rather than 500.
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         blob = (struct.pack("<dI", mtime, len(positions))
                 + positions.astype("<f4").tobytes()
                 + colors.astype("<u1").tobytes())

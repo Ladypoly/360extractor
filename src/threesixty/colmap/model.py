@@ -304,21 +304,33 @@ def read_points(model_dir: str | Path, limit: int | None = None
 
 
 def _read_points_binary(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    # Read the whole file at once and bounds-check every record: the live view polls this
+    # while COLMAP is still writing it, so a half-written tail must be stopped at rather
+    # than fed a garbage track length (which turns into a giant read / MemoryError).
+    data = path.read_bytes()
     positions: list[tuple[float, float, float]] = []
     colors: list[tuple[int, int, int]] = []
-    with open(path, "rb") as handle:
-        (count,) = _read(handle, "<Q")
-        size = _POINT_RECORD.size
-        for _ in range(count):
-            record = handle.read(size)
-            if len(record) < size:
-                break
-            values = _POINT_RECORD.unpack(record)
-            positions.append(values[1:4])
-            colors.append(values[4:7])
-            handle.read(values[8] * 8)   # skip the track (two int32 per element)
+    if len(data) < 8:
+        return _empty_points()
+    (count,) = struct.unpack_from("<Q", data, 0)
+    offset, size, total = 8, _POINT_RECORD.size, len(data)
+    for _ in range(count):
+        if offset + size > total:
+            break                                  # truncated mid-record
+        values = _POINT_RECORD.unpack_from(data, offset)
+        offset += size
+        track_bytes = values[8] * 8                # two int32 per track element
+        if track_bytes < 0 or offset + track_bytes > total:
+            break                                  # track not fully written yet
+        offset += track_bytes
+        positions.append(values[1:4])
+        colors.append(values[4:7])
     return (np.array(positions, np.float32).reshape(-1, 3),
             np.array(colors, np.uint8).reshape(-1, 3))
+
+
+def _empty_points() -> tuple[np.ndarray, np.ndarray]:
+    return np.empty((0, 3), np.float32), np.empty((0, 3), np.uint8)
 
 
 def _read_points_text(path: Path) -> tuple[np.ndarray, np.ndarray]:
