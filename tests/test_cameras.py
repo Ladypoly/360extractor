@@ -42,6 +42,28 @@ def test_frame_numbers_match_across_cameras(ffmpeg, extracted):
     assert len(listings[0]) >= 1
 
 
+def test_sky_cone_writes_mask_sidecars(ffmpeg, extracted):
+    """A sky cone projects to one mask per image, mirroring the images tree."""
+    root, frames = extracted
+    rig = ring(3)
+    result = generate_cameras(ffmpeg, frames, rig, root, sky_cone_angle=30.0)
+
+    assert result.masks_written > 0
+    for camera in rig.normalized_cameras():
+        image_dir = root / "images" / "clip" / camera.name
+        mask_dir = root / "masks" / "clip" / camera.name
+        images = sorted(p.stem for p in image_dir.glob("*.jpg"))
+        masks = sorted(p.stem for p in mask_dir.glob("*.png"))
+        assert masks == images and images       # a mask per image, same stems
+
+
+def test_no_occluders_means_no_masks(ffmpeg, extracted):
+    root, frames = extracted
+    result = generate_cameras(ffmpeg, frames, ring(2), root)   # no sky cone, no occluders
+    assert result.masks_written == 0
+    assert not (root / "masks").exists()
+
+
 def test_missing_frames_is_a_clear_error(ffmpeg, tmp_path):
     with pytest.raises(Exception, match="extract frames"):
         generate_cameras(ffmpeg, tmp_path / "frames" / "nope", ring(2), tmp_path)

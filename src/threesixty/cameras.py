@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .ffmpeg import FFmpegError, FFmpegInfo, probe_media
+from .mask import geometric
+from .mask.apply import link_sidecars
 from .plan import build_filter_graph, camera_size, safe_stem
 from .rig import Rig
 
@@ -26,7 +28,39 @@ from .rig import Rig
 class CamerasResult:
     directories: list[Path] = field(default_factory=list)
     images_written: int = 0
+    masks_written: int = 0
     cancelled: bool = False
+
+
+def _project_masks(ffmpeg: FFmpegInfo, rig: Rig, cameras, sizes, directories,
+                   sample, output_root: Path, clip: str,
+                   sky_cone_angle: float | None) -> int:
+    """Project static occluders and the sky cone into per-camera sidecar masks.
+
+    Static occluders are rigid to the rig, so one equirect mask projects to one mask per
+    camera and links beside every frame -- the same guaranteed-alignment trick the
+    single-pass extractor used. Sky exclusion rides along as a zenith cone here; the
+    per-frame semantic path (detection on the equirect frames) layers on later.
+    """
+    raw = list(rig.occluders)
+    if sky_cone_angle and sky_cone_angle > 0:
+        raw.append({"type": "zenith_cone", "angle": float(sky_cone_angle)})
+    occluders = [o for o in (geometric.Occluder.from_dict(d) for d in raw)
+                 if o.kind != "ml"]
+    if not occluders:
+        return 0
+
+    work = output_root / ".threesixty" / "masks"
+    equirect = geometric.build_equirect_mask(
+        ffmpeg, occluders, sample.width, sample.height or sample.width // 2,
+        work / "equirect.png")
+    total = 0
+    for camera, (width, height), image_dir in zip(cameras, sizes, directories):
+        camera_mask = geometric.render_camera_mask(
+            ffmpeg, equirect, camera, width, height, work / f"{camera.name}.png")
+        total += link_sidecars(camera_mask, image_dir,
+                               output_root / "masks" / clip / camera.name)
+    return total
 
 
 def _sequence(frames_directory: Path) -> tuple[str, int]:
@@ -41,9 +75,14 @@ def _sequence(frames_directory: Path) -> tuple[str, int]:
 
 def generate_cameras(ffmpeg: FFmpegInfo, frames_directory: str | Path, rig: Rig,
                      output_root: str | Path, clip: str | None = None,
+                     sky_cone_angle: float | None = None,
                      on_progress=None, should_cancel=None,
                      overwrite: bool = True) -> CamerasResult:
-    """Project every extracted frame through the rig into images/<clip>/<camera>/."""
+    """Project every extracted frame through the rig into images/<clip>/<camera>/.
+
+    When there are static occluders or a sky cone, also writes the matching per-camera
+    mask sidecars so the result is training-ready without a separate masking pass.
+    """
     rig.validate()
     frames_directory = Path(frames_directory)
     pattern, start_number = _sequence(frames_directory)
@@ -103,5 +142,9 @@ def generate_cameras(ffmpeg: FFmpegInfo, frames_directory: str | Path, rig: Rig,
         raise FFmpegError(f"camera generation failed: {error.strip()}")
 
     written = sum(len(list(directory.glob("*.jpg"))) for directory in directories)
+    masks_written = 0
+    if not cancelled:
+        masks_written = _project_masks(ffmpeg, rig, cameras, sizes, directories, sample,
+                                       Path(output_root), clip, sky_cone_angle)
     return CamerasResult(directories=directories, images_written=written,
-                         cancelled=cancelled)
+                         masks_written=masks_written, cancelled=cancelled)

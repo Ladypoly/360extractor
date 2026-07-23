@@ -1014,16 +1014,27 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("extract frames before generating cameras")
         session = self.session
         rig = project.rig
+        detect = project.detect
+        # Sky exclusion via the cone until the semantic model lands ("auto" falls back to
+        # the cone when there is no model); "off"/"model" pass None for the cone here.
+        sky_cone = (detect.sky_cone_angle
+                    if detect.exclude_sky and detect.sky_method in ("auto", "cone")
+                    else None)
         job = self.session.jobs["capture"]
 
         def work(running_job) -> dict:
             result = cameras.generate_cameras(
                 session.ffmpeg, frames_directory, rig, project.root, clip=clip,
+                sky_cone_angle=sky_cone,
                 on_progress=lambda frac, n, _t: running_job.progress(frac, f"frame {n}"),
                 should_cancel=running_job.cancel.is_set)
             project.mark_done("extract", images=result.images_written)
+            if result.masks_written:
+                # mark_done("extract") cascades a reset of mask/export, so record the
+                # masks produced here after it, not before.
+                project.mark_done("mask", masks=result.masks_written)
             project.save()
-            return {"images": result.images_written,
+            return {"images": result.images_written, "masks": result.masks_written,
                     "summary": f"{result.images_written} camera images"}
 
         job.start(work, name="generating cameras")

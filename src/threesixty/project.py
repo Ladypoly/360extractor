@@ -59,7 +59,7 @@ class OutputSettings:
 
 @dataclass
 class DetectSettings:
-    """Dynamic occluder detection."""
+    """Dynamic occluder detection, and the always-on sky exclusion."""
 
     backend: str = "sam2.1"
     classes: list[str] = field(default_factory=lambda: [
@@ -68,6 +68,13 @@ class DetectSettings:
     dilate: int = 6
     device: str | None = None
     fuse: bool = True
+    #: Sky is masked out of the splat by default -- it only ever seeds floaters. `method`
+    #: is auto (semantic model when available, else the cone), model, cone, or off. The
+    #: cone masks everything above `sky_cone_angle` degrees of elevation: blunt, but a
+    #: dependency-free guarantee until the semantic model is in.
+    exclude_sky: bool = True
+    sky_method: str = "auto"
+    sky_cone_angle: float = 30.0
 
 
 @dataclass
