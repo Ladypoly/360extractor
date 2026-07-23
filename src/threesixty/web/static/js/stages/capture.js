@@ -565,8 +565,12 @@ export function CaptureStage(ctx) {
 
   function addCamera() {
     if (!local.rig) return;
+    // Inherit the rig's global FOV/shape, not a hard-coded default.
+    const h = parseFloat(camFov.value) || 90;
+    const ratio = parseFloat(camShape.value) || 4 / 3;
     local.rig.cameras.push({ name: `cam${local.rig.cameras.length + 1}`, yaw: 0, pitch: 0,
-                             roll: 0, h_fov: 90, v_fov: 67.5, enabled: true });
+                             roll: 0, h_fov: h, v_fov: Math.min(h / ratio, 179),
+                             enabled: true });
     select(local.rig.cameras.length - 1); refresh();
   }
 
