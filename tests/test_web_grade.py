@@ -64,11 +64,11 @@ class TestPreviewCache:
         assert session.preview_source is not None
         assert session.preview_source.exists()
 
-    def test_regrading_needs_a_preview_first(self, ui):
+    def test_regrading_needs_a_frame_or_a_preview_first(self, ui):
         base, _ = ui
         status, body = post(base, "/api/preview/grade", {"grade": {"exposure": 1.0}})
         assert status == 400
-        assert "no preview loaded" in body["error"]
+        assert "load a source first" in body["error"]
 
     def test_regrade_does_not_touch_the_video(self, ui, equirect_clip):
         """The cached frame is what gets graded, so the source can go away."""

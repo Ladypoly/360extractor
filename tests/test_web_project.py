@@ -275,15 +275,32 @@ class TestRecentProjects:
 
 
 class TestTwoStageCapture:
-    def _wait(self, base, timeout=120):
+    def _wait(self, base, stage="capture", timeout=120):
         import time
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            _, snap = post(base, "/api/job/status", {"stage": "capture"})
+            _, snap = post(base, "/api/job/status", {"stage": stage})
             if snap.get("state") not in ("running", "pending"):
                 return snap
             time.sleep(0.2)
-        raise AssertionError("capture job did not finish in time")
+        raise AssertionError(f"{stage} job did not finish in time")
+
+    def test_extract_frames_runs_on_start_not_capture(self, make_ui, tmp_path,
+                                                      equirect_clip):
+        """The reported complaint: Capture spun, then ticked, during an import."""
+        source = tmp_path / "drive.mp4"
+        shutil.copy(equirect_clip, source)
+        project = Project.create(tmp_path / "proj", sources=[str(source)])
+        base, _ = make_ui(project)
+
+        status, body = post(base, "/api/frames/extract", {"mode": "fps", "value": 5})
+        assert status == 200 and body["stage"] == "start"
+        assert self._wait(base, "start")["state"] == "done"
+
+        _, capture = post(base, "/api/job/status", {"stage": "capture"})
+        assert capture["state"] == "pending"
+        # ...and the project does not claim its images exist yet either.
+        assert Project.load(tmp_path / "proj").status("extract") == "pending"
 
     def test_extract_frames_then_generate_cameras(self, make_ui, tmp_path, equirect_clip):
         source = tmp_path / "drive.mp4"
@@ -293,7 +310,7 @@ class TestTwoStageCapture:
 
         status, body = post(base, "/api/frames/extract", {"mode": "fps", "value": 5})
         assert status == 200 and body["started"]
-        snap = self._wait(base)
+        snap = self._wait(base, "start")
         assert snap["state"] == "done", snap
         assert snap["result"]["frames"] >= 1
         assert (tmp_path / "proj" / "frames" / "drive").is_dir()
@@ -321,7 +338,7 @@ class TestTwoStageCapture:
         assert get(base, "/api/frames/list")["frames"] == []      # none yet
 
         post(base, "/api/frames/extract", {"mode": "fps", "value": 5})
-        self._wait(base)
+        self._wait(base, "start")
         listing = get(base, "/api/frames/list")
         assert listing["clip"] == "drive" and len(listing["frames"]) >= 1
 
@@ -659,6 +676,39 @@ class TestMaskFrameOverlay:
         base, _ = make_ui(project)
         status, body = post(base, "/api/mask/frame", {"frame": "99999.jpg"})
         assert status == 400 and "no such frame" in body["error"]
+
+    def test_grading_works_from_an_extracted_frame(
+            self, make_ui, ffmpeg, tmp_path, equirect_clip):
+        """Capture has no decoded video preview in the two-stage flow, so Auto and the
+        sliders have to grade the frame on the canvas instead of erroring."""
+        project, names = self._project_with_frames(tmp_path, ffmpeg, equirect_clip)
+        base, _ = make_ui(project)
+
+        status, body = post(base, "/api/grade/auto", {"frame": names[0]})
+        assert status == 200 and "exposure" in body["grade"]
+
+        status, body = post(base, "/api/preview/grade",
+                            {"frame": names[0], "width": 320,
+                             "grade": {**body["grade"], "brightness": 0.2}})
+        assert status == 200 and body["url"]
+        with urllib.request.urlopen(base + body["url"], timeout=30) as response:
+            assert response.read()[:2] == b"\xff\xd8"      # a real jpeg came back
+
+    def test_grading_without_a_frame_or_preview_says_so(self, make_ui, tmp_path):
+        base, _ = make_ui(Project.create(tmp_path / "p"))
+        status, body = post(base, "/api/grade/auto", {})
+        assert status == 400 and "load a source first" in body["error"]
+
+    def test_a_graded_frame_answers_to_a_stable_name(
+            self, make_ui, ffmpeg, tmp_path, equirect_clip):
+        """Same frame, same grade -> same URL, so the browser keeps it cached."""
+        project, names = self._project_with_frames(tmp_path, ffmpeg, equirect_clip)
+        base, _ = make_ui(project)
+        request = {"frame": names[0], "width": 320, "grade": {"brightness": 0.1}}
+
+        _, first = post(base, "/api/preview/grade", request)
+        _, again = post(base, "/api/preview/grade", request)
+        assert first["url"] == again["url"]
 
     def test_frames_are_served_at_the_asked_width(
             self, make_ui, ffmpeg, tmp_path, equirect_clip):

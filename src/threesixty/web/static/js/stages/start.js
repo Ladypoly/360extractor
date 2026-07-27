@@ -141,7 +141,7 @@ export function StartStage(ctx) {
   const actionBar = StageActionBar({
     primaryLabel: "Process",
     onPrimary: process,
-    onCancel: () => ctx.api.jobs.cancel("capture").then(ctx.pokeJobs),
+    onCancel: () => ctx.api.jobs.cancel("start").then(ctx.pokeJobs),
   });
 
   const panel = el("div", { class: "stage-panel start-panel" },
@@ -378,14 +378,14 @@ export function StartStage(ctx) {
     },
     onEnter: () => refreshRecent(),
     onJobs: (_job, allJobs) => {
-      const capture = allJobs.capture;
-      actionBar.render(capture);
+      const importing = allJobs.start;
+      actionBar.render(importing);
       // When our Process (frame extraction) finishes, move on to the rig.
-      if (processing && capture && capture.state === "done" && lastState === "running") {
+      if (processing && importing && importing.state === "done" && lastState === "running") {
         processing = false;
         ctx.goTo("capture");
       }
-      lastState = capture ? capture.state : null;
+      lastState = importing ? importing.state : null;
     },
     applyProject(project) {
       if (!project) return;

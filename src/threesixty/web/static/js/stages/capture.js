@@ -706,20 +706,36 @@ export function CaptureStage(ctx) {
     if (local.rig) local.rig.grade = grade;
   }
 
+  function gradeIsNeutral() {
+    const grade = readGrade();
+    return Object.entries(GRADE_FIELDS).every(([key, spec]) => grade[key] === spec.neutral);
+  }
+
+  /** What the panorama on the canvas is: the frame, graded if a grade is set. */
+  function gradePayload(width) {
+    const payload = { grade: readGrade(), width };
+    if (local.frames.length) payload.frame = local.frames[local.frameIndex];
+    return payload;
+  }
+
+  async function gradedFrameUrl(name, width) {
+    if (gradeIsNeutral()) return `/frames/${local.clip}/${name}?w=${width}`;
+    const { url } = await ctx.api.post("/api/preview/grade",
+                                       { frame: name, grade: readGrade(), width });
+    return url;
+  }
+
   let regradeBusy = false, regradePending = null;
   async function regrade(width) {
-    if (!local.media) return;
+    // Works on the extracted frame when there is one -- the grade belongs to the
+    // panorama on the canvas, not only to the camera tiles cut out of it.
+    if (!local.media && !local.frames.length) return;
     if (regradeBusy) { regradePending = width; return; }
     regradeBusy = true;
     try {
-      const data = await ctx.api.post("/api/preview/grade",
-                                      { grade: readGrade(), width });
-      await new Promise((resolve) => {
-        const img = new Image();
-        img.onload = () => { local.image = img; draw(); resolve(); };
-        img.onerror = resolve;
-        img.src = data.url;
-      });
+      const data = await ctx.api.post("/api/preview/grade", gradePayload(width));
+      local.image = await loadImage(data.url);
+      draw();
     } catch (error) { ctx.report(error); }
     finally {
       regradeBusy = false;
@@ -735,9 +751,13 @@ export function CaptureStage(ctx) {
   }
 
   async function autoGrade() {
-    if (!local.media) { ctx.flash("Load a source first.", { level: "warn" }); return; }
+    if (!local.media && !local.frames.length) {
+      ctx.flash("Extract frames on the Start tab first.", { level: "warn" }); return;
+    }
     try {
-      const data = await ctx.api.post("/api/grade/auto", {});
+      // Measures the frame Capture is actually showing, which in the two-stage flow is
+      // an extracted panorama rather than a decoded video preview.
+      const data = await ctx.api.post("/api/grade/auto", gradePayload(FULL_WIDTH));
       writeGrade(data.grade);
       gradeNotes.innerHTML = data.notes.join("<br>");
       refresh(); regrade(FULL_WIDTH); previewCamera();
@@ -1093,7 +1113,7 @@ export function CaptureStage(ctx) {
     const token = ++local.frameToken;   // a later frame wins over an in-flight earlier one
 
     try {
-      const img = await loadImage(frameUrl(name));
+      const img = await loadImage(await gradedFrameUrl(name, CANVAS_WIDTH));
       if (token !== local.frameToken) return;
       local.image = img;
       local.maskLayer = null;
@@ -1120,9 +1140,13 @@ export function CaptureStage(ctx) {
     } finally { overlayToggle.classList.remove("is-busy"); }
   }
 
-  /** Warm the next frame while the user looks at this one. */
+  /** Warm the next frame while the user looks at this one.
+   *
+   * Only while the grade is neutral: a graded frame has to be rendered on request, and
+   * speculatively rendering one is spending ffmpeg on a frame nobody asked for. */
   function prefetch(index) {
     if (index < 0 || index >= local.frames.length || !local.clip) return;
+    if (!gradeIsNeutral()) return;
     loadImage(frameUrl(local.frames[index])).catch(() => {});
   }
 

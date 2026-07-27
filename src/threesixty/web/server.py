@@ -1048,28 +1048,55 @@ class Handler(BaseHTTPRequestHandler):
             raise FFmpegError(f"regrade failed: {result.stderr.strip()}")
         return target
 
+    def _grade_source(self, payload: dict) -> Path:
+        """The image the grade controls are acting on.
+
+        In the two-stage flow Capture has no decoded video preview -- it works on an
+        extracted frame -- so `frame` names one and it is graded directly. Falls back to
+        the decoded panorama for the single-pass path.
+        """
+        name = str(payload.get("frame") or "")
+        project = self.session.project
+        if name and project and project.resolved_sources():
+            clip = safe_stem(project.resolved_sources()[0].stem)
+            path = frames.frames_dir(project.root, clip) / name
+            if path.exists():
+                proxy = self._derived(
+                    f"frame|{path}|{path.stat().st_mtime_ns}|{PREVIEW_WIDTH}", ".jpg")
+                return self._scaled(path, PREVIEW_WIDTH, -2, proxy)
+
+        source = self.session.preview_source
+        if source is None or not source.exists():
+            raise ValueError("load a source first; grading works on what is on screen")
+        return source
+
     def api_preview_grade(self, payload: dict) -> dict:
         """Re-grade the frame already on screen, without touching the video.
 
         `width` lets the browser ask for a small proxy while a slider is moving and the
-        full-size frame when it is released.
+        full-size frame when it is released. Grading an extracted frame answers to a
+        stable name, so the browser can cache it and going back to a frame is free.
         """
-        source = self.session.preview_source
-        if source is None or not source.exists():
-            raise ValueError("no preview loaded yet")
+        source = self._grade_source(payload)
         width = max(64, min(int(payload.get("width", PREVIEW_WIDTH)), PREVIEW_WIDTH))
-        target = self.session.next_name(".jpg")
-        graded = self._regrade(source, payload.get("grade"), width, target)
+        grade_data = payload.get("grade")
+
+        if payload.get("frame"):
+            key = json.dumps(grade_data, sort_keys=True, default=str)
+            target = self._derived(f"grade|{source}|{width}|{key}", ".jpg")
+            if target.exists():
+                return {"url": f"/preview/{target.name}", "width": width}
+        else:
+            target = self.session.next_name(".jpg")
+
+        graded = self._regrade(source, grade_data, width, target)
         return {"url": f"/preview/{graded.name}", "width": width}
 
     def api_grade_auto(self, payload: dict) -> dict:
         """Measure the frame on screen and propose a grade for it."""
         from .. import autograde
 
-        source = self.session.preview_source
-        if source is None or not source.exists():
-            raise ValueError("load a source first; auto grades what is on screen")
-
+        source = self._grade_source(payload)
         grade, analysis = autograde.auto_grade(self.session.ffmpeg, source)
         return {
             "grade": asdict(grade),
@@ -1311,6 +1338,9 @@ class Handler(BaseHTTPRequestHandler):
         This is the first half of the two-stage capture -- decode + frame thinning, no
         rig. The rig and masking are applied later by camera generation, so the frames
         can be re-rigged without decoding the video again.
+
+        It runs on the `start` job, not `capture`: importing a video is Start's work, and
+        reporting it as Capture's made that stage look like it had run and finished.
         """
         project = self._open_project()
         sources = project.resolved_sources()
@@ -1321,7 +1351,7 @@ class Handler(BaseHTTPRequestHandler):
             start=payload.get("start"), end=payload.get("end"))
         selection.validate()
         session = self.session
-        job = self.session.jobs["capture"]
+        job = self.session.jobs["start"]
 
         def work(running_job) -> dict:
             info = probe_media(sources[0], session.ffmpeg)
@@ -1340,7 +1370,7 @@ class Handler(BaseHTTPRequestHandler):
                     "summary": f"{result.count} frames extracted"}
 
         job.start(work, name="extracting frames")
-        return {"started": True, "stage": "capture"}
+        return {"started": True, "stage": "start"}
 
     def api_cameras_generate(self, payload: dict) -> dict:
         """Stage B: project the extracted frames through the rig into camera tiles."""

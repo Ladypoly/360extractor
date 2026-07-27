@@ -284,7 +284,7 @@ class TestReconstructWorkspace:
 class TestJobsAcrossStages:
     def test_a_running_job_shows_in_the_pipeline_from_another_stage(self, page):
         """Leaving a stage must not hide, or stop, its work."""
-        # Start a capture job (frame extraction, a Start-tab action) via the API.
+        # Start a frame extraction -- a Start-tab action, and so a Start-tab job.
         page.evaluate("""async () => {
             await fetch('/api/frames/extract', {method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -298,11 +298,14 @@ class TestJobsAcrossStages:
             "  b.disabled = false; b.click(); }")
         page.wait_for_function(
             """() => {
-                 const tab = document.querySelector('#stage-tab-capture');
+                 const tab = document.querySelector('#stage-tab-start');
                  return tab && (tab.className.includes('running')
                              || tab.className.includes('done'));
                }""",
             timeout=45000)
+        # ...and Capture, which has not run, must not be claiming it did.
+        assert "running" not in page.locator("#stage-tab-capture").get_attribute("class")
+        assert "done" not in page.locator("#stage-tab-capture").get_attribute("class")
         assert page.locator("#stage-panel-reconstruct").is_visible()
 
 

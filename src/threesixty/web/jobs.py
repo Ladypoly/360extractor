@@ -25,8 +25,12 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
-#: Pipeline stages, in order. The UI renders navigation straight from this.
-STAGES = ("capture", "refine", "reconstruct", "train", "inspect")
+#: One job per thing that can be running, in pipeline order. Frame extraction is its
+#: own job rather than sharing Capture's: they are two different steps on two different
+#: tabs, and sharing one made Capture claim to be running -- then finished -- while all
+#: that had happened was an import. `refine` is retired from the UI but still reachable
+#: through /api/detect/run.
+STAGES = ("start", "capture", "refine", "reconstruct", "train", "inspect")
 
 #: How much log each job keeps. Enough to explain a failure, bounded so a chatty
 #: process cannot grow without limit.
@@ -180,7 +184,8 @@ class AlreadyRunning(RuntimeError):
         self.stage = stage
         self.what = what
         label = {
-            "capture": "Frame extraction",
+            "start": "Frame extraction",
+            "capture": "Camera generation",
             "refine": "Dynamic mask detection",
             "reconstruct": "Reconstruction",
             "train": "Splat training",
