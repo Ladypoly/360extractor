@@ -82,23 +82,28 @@ def discover(root: Path, rig: Rig) -> list[CameraImages]:
             f"dataset -- run `360extract extract` first."
         )
 
+    from .. import dataset
+
     by_name = {camera.name: camera for camera in rig.normalized_cameras()}
     found: list[CameraImages] = []
 
-    for directory in sorted(p for p in images_root.rglob("*") if p.is_dir()):
-        camera = by_name.get(directory.name)
+    for folder in sorted(p for p in images_root.rglob("*") if p.is_dir()):
+        camera = by_name.get(folder.name)
         if camera is None:
             continue
+        # A camera folder holds its images in `.geometry` and its masks in `.mask`;
+        # older datasets have the images directly inside and the masks off in `masks/`.
+        directory = dataset.geometry_dir(root, None, folder.relative_to(images_root))
         frames = {}
-        for image in sorted(directory.iterdir()):
+        for image in sorted(directory.iterdir()) if directory.is_dir() else []:
             if image.is_file() and image.suffix.lower() in IMAGE_SUFFIXES:
                 frames[frame_number(image)] = image
         if frames:
-            relative = directory.relative_to(images_root)
             found.append(CameraImages(
                 camera=camera,
                 directory=directory,
-                mask_directory=root / "masks" / relative,
+                mask_directory=dataset.mask_dir(root, None,
+                                                folder.relative_to(images_root)),
                 frames=frames,
             ))
     return found

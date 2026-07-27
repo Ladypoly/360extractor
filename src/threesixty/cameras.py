@@ -36,8 +36,8 @@ class CamerasResult:
     #: the user about rather than shipping: it usually means the model missed a frame
     #: the neighbouring ones handled, and an unmasked car is a floater.
     undetected: list[str] = field(default_factory=list)
-    exported_images: int = 0
-    exported_masks: int = 0
+    #: Images that had no mask and were given a blank one.
+    blank_masks: int = 0
     cancelled: bool = False
 
 
@@ -68,7 +68,7 @@ def _project_masks(ffmpeg: FFmpegInfo, rig: Rig, cameras, sizes, directories,
         camera_mask = geometric.render_camera_mask(
             ffmpeg, equirect, camera, width, height, work / f"{camera.name}.png")
         total += link_sidecars(camera_mask, image_dir,
-                               dataset.masks_dir(output_root, clip) / camera.name)
+                               dataset.mask_dir(output_root, clip, camera.name))
     return total
 
 
@@ -159,11 +159,11 @@ def _project_mask_sequence(ffmpeg, mask_sequence_dir: Path, rig: Rig, cameras, s
             "-i", str(mask_sequence_dir / mask_pattern), "-filter_complex", graph]
     directories = []
     for label, camera in zip(labels, cameras):
-        mask_dir = dataset.masks_dir(output_root, clip) / camera.name
-        mask_dir.mkdir(parents=True, exist_ok=True)
-        directories.append(mask_dir)
+        target = dataset.mask_dir(output_root, clip, camera.name)
+        target.mkdir(parents=True, exist_ok=True)
+        directories.append(target)
         argv += ["-map", f"[{label}]", "-start_number", str(start_number),
-                 str(mask_dir / mask_pattern)]
+                 str(target / mask_pattern)]
     result = subprocess.run(argv, capture_output=True, text=True, errors="replace")
     if result.returncode != 0:
         raise FFmpegError(f"mask projection failed: {result.stderr.strip()}")
@@ -175,13 +175,13 @@ def generate_cameras(ffmpeg: FFmpegInfo, frames_directory: str | Path, rig: Rig,
                      sky_cone_angle: float | None = None, detect=None,
                      on_progress=None, on_mask_progress=None, should_cancel=None,
                      overwrite: bool = True) -> CamerasResult:
-    """Project every extracted frame through the rig into images/<camera>/.
+    """Project every extracted frame through the rig into images/<camera>/.geometry/.
 
     Also writes the matching per-camera mask sidecars so the result is training-ready:
     per-frame detection on the panorama frames when `detect` has classes and ML is
-    installed, otherwise just the static occluders / sky cone. Finally the working set is
-    mirrored into the exported `RC_Dataset/` layout (`dataset.py` explains why the two
-    trees cannot be one).
+    installed, otherwise just the static occluders / sky cone. Masks land in each
+    camera's own `.mask` folder and are then mirrored into `masks/` for COLMAP and Brush
+    (`dataset.py` explains why that mirror has to exist).
     """
     rig.validate()
     frames_directory = Path(frames_directory)
@@ -205,7 +205,7 @@ def generate_cameras(ffmpeg: FFmpegInfo, frames_directory: str | Path, rig: Rig,
     root = Path(output_root)
     directories: list[Path] = []
     for label, camera in zip(labels, cameras):
-        camera_dir = dataset.images_dir(root, clip) / camera.name
+        camera_dir = dataset.geometry_dir(root, clip, camera.name)
         camera_dir.mkdir(parents=True, exist_ok=True)
         directories.append(camera_dir)
         argv += ["-map", f"[{label}]", "-start_number", str(start_number),
@@ -244,7 +244,7 @@ def generate_cameras(ffmpeg: FFmpegInfo, frames_directory: str | Path, rig: Rig,
     written = sum(len(list(directory.glob("*.jpg"))) for directory in directories)
     masks_written = 0
     undetected: list[str] = []
-    exported = dataset.ExportResult()
+    blanks: list[tuple[str, str]] = []
     if not cancelled:
         root = Path(output_root)
         detected = _detect_equirect_masks(
@@ -260,10 +260,15 @@ def generate_cameras(ffmpeg: FFmpegInfo, frames_directory: str | Path, rig: Rig,
             # Static only: one rigid mask per camera, linked beside every frame.
             masks_written = _project_masks(ffmpeg, rig, cameras, sizes, directories,
                                            sample, root, clip, sky_cone_angle)
-        # The working set is complete; mirror it into the exported layout.
-        exported = dataset.export_dataset(root, clip,
-                                          [camera.name for camera in cameras])
+        # Every image gets a mask, even where masking found nothing -- an image with
+        # no mask at all is indistinguishable from one masking failed on.
+        names = [camera.name for camera in cameras]
+        blanks = dataset.fill_missing_masks(root, clip, names)
+        if blanks:
+            undetected = sorted(set(undetected) | {stem for _, stem in blanks})
+        # ...then mirror them into the root both trainers insist on reading.
+        mirrored = dataset.mirror_masks(root, clip, names)
+        masks_written = max(masks_written, mirrored.masks)
     return CamerasResult(directories=directories, images_written=written,
                          masks_written=masks_written, undetected=undetected,
-                         exported_images=exported.images,
-                         exported_masks=exported.masks, cancelled=cancelled)
+                         blank_masks=len(blanks), cancelled=cancelled)

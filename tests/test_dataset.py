@@ -1,4 +1,4 @@
-"""The exported RC_Dataset layout, and dropping frames out of a dataset."""
+"""The dataset layout on disk: masks beside images, the trainers' mirror, pruning."""
 
 from pathlib import Path
 
@@ -6,72 +6,103 @@ from threesixty import dataset
 
 
 def build_working_set(root: Path, clip: str, cameras, frames, masks=True, legacy=False):
-    """A minimal images/ + masks/ tree, the shape camera generation leaves behind.
+    """A minimal dataset, the shape camera generation leaves behind.
 
-    `legacy` writes the older shape, with the clip repeated inside each tree.
+    `legacy` writes the older shape: images flat in `images/<camera>/`, masks in a
+    separate `masks/<camera>/`, both under a repeated clip folder.
     """
-    middle = (lambda name: root / name / clip) if legacy else (lambda name: root / name)
     for camera in cameras:
-        image_dir = middle("images") / camera
+        if legacy:
+            image_dir = root / "images" / clip / camera
+            mask_target = root / "masks" / clip / camera
+        else:
+            image_dir = root / "images" / camera / ".geometry"
+            mask_target = root / "images" / camera / ".mask"
         image_dir.mkdir(parents=True, exist_ok=True)
         for stem in frames:
             (image_dir / f"{stem}.jpg").write_bytes(b"jpg")
         if masks:
-            mask_dir = middle("masks") / camera
-            mask_dir.mkdir(parents=True, exist_ok=True)
+            mask_target.mkdir(parents=True, exist_ok=True)
             for stem in frames:
-                (mask_dir / f"{stem}.png").write_bytes(b"png")
-    frames_dir = middle("frames")
+                (mask_target / f"{stem}.png").write_bytes(b"png")
+    frames_dir = (root / "frames" / clip) if legacy else (root / "frames")
     frames_dir.mkdir(parents=True, exist_ok=True)
     for stem in frames:
         (frames_dir / f"{stem}.jpg").write_bytes(b"jpg")
 
 
-class TestExportLayout:
-    def test_views_geometry_and_masks_are_named_by_frame_and_view(self, tmp_path):
+class TestLayout:
+    def test_a_camera_holds_its_images_and_its_masks(self, tmp_path):
         build_working_set(tmp_path, "clip", ["c00", "c01"], ["00001", "00002"])
 
-        result = dataset.export_dataset(tmp_path, "clip", ["c00", "c01"])
+        assert dataset.geometry_dir(tmp_path, "clip", "c00")             == tmp_path / "images" / "c00" / ".geometry"
+        assert dataset.mask_dir(tmp_path, "clip", "c00")             == tmp_path / "images" / "c00" / ".mask"
 
-        root = tmp_path / "RC_Dataset"
-        assert sorted(p.name for p in root.iterdir()) == ["view_00", "view_01"]
-        assert (root / "view_00" / ".geometry" / "frame_000001_v00.jpg").exists()
-        assert (root / "view_00" / ".mask" / "frame_000001_v00.png").exists()
-        assert (root / "view_01" / ".geometry" / "frame_000002_v01.jpg").exists()
-        assert (root / "view_01" / ".mask" / "frame_000002_v01.png").exists()
-        assert result.images == 4 and result.masks == 4
-
-    def test_export_shares_bytes_with_the_working_set(self, tmp_path):
-        """Hard links, not copies: the export must not double the dataset on disk."""
+    def test_the_subpath_the_trainers_see(self, tmp_path):
         build_working_set(tmp_path, "clip", ["c00"], ["00001"])
-        dataset.export_dataset(tmp_path, "clip", ["c00"])
+        assert dataset.relative_subpath(tmp_path, "clip", "c00") == "c00/.geometry"
 
-        original = tmp_path / "images" / "c00" / "00001.jpg"
-        exported = tmp_path / "RC_Dataset" / "view_00" / ".geometry" / "frame_000001_v00.jpg"
-        assert exported.stat().st_ino == original.stat().st_ino
+
+class TestMirror:
+    """COLMAP and Brush each insist on their own name for the same mask file."""
+
+    def test_both_names_are_written(self, tmp_path):
+        build_working_set(tmp_path, "clip", ["c00", "c01"], ["00001", "00002"])
+        result = dataset.mirror_masks(tmp_path, "clip", ["c00", "c01"])
+
+        mirror = tmp_path / "masks" / "c00" / ".geometry"
+        assert (mirror / "00001.png").exists()          # Brush
+        assert (mirror / "00001.jpg.png").exists()      # COLMAP's doubled extension
+        assert result.masks == 4                        # one per image, both cameras
+
+    def test_the_mirror_shares_bytes_with_the_dataset(self, tmp_path):
+        build_working_set(tmp_path, "clip", ["c00"], ["00001"])
+        dataset.mirror_masks(tmp_path, "clip", ["c00"])
+
+        original = tmp_path / "images" / "c00" / ".mask" / "00001.png"
+        mirrored = tmp_path / "masks" / "c00" / ".geometry" / "00001.png"
+        assert mirrored.stat().st_ino == original.stat().st_ino
 
     def test_a_rerun_with_fewer_frames_leaves_nothing_stale(self, tmp_path):
         build_working_set(tmp_path, "clip", ["c00"], ["00001", "00002"])
-        dataset.export_dataset(tmp_path, "clip", ["c00"])
+        dataset.mirror_masks(tmp_path, "clip", ["c00"])
 
-        (tmp_path / "images" / "c00" / "00002.jpg").unlink()
-        dataset.export_dataset(tmp_path, "clip", ["c00"])
+        (tmp_path / "images" / "c00" / ".mask" / "00002.png").unlink()
+        dataset.mirror_masks(tmp_path, "clip", ["c00"])
 
-        geometry = tmp_path / "RC_Dataset" / "view_00" / ".geometry"
-        assert sorted(p.name for p in geometry.iterdir()) == ["frame_000001_v00.jpg"]
+        mirror = tmp_path / "masks" / "c00" / ".geometry"
+        assert sorted(p.name for p in mirror.iterdir()) ==             ["00001.jpg.png", "00001.png"]
 
-    def test_images_without_masks_still_export(self, tmp_path):
-        build_working_set(tmp_path, "clip", ["c00"], ["00001"], masks=False)
-        result = dataset.export_dataset(tmp_path, "clip", ["c00"])
 
-        assert result.images == 1 and result.masks == 0
-        assert (tmp_path / "RC_Dataset" / "view_00" / ".mask").is_dir()
+class TestEveryImageGetsAMask:
+    """The reported complaint: exported images with no mask at all."""
+
+    def test_a_missing_mask_is_filled_with_a_blank_one(self, tmp_path):
+        build_working_set(tmp_path, "clip", ["c00"], ["00001", "00002"], masks=False)
+        # A real image, so the blank can match its size.
+        import numpy as np, cv2
+        for stem in ("00001", "00002"):
+            cv2.imwrite(str(tmp_path / "images" / "c00" / ".geometry" / f"{stem}.jpg"),
+                        np.zeros((8, 16, 3), np.uint8))
+
+        filled = dataset.fill_missing_masks(tmp_path, "clip", ["c00"])
+
+        assert sorted(stem for _, stem in filled) == ["00001", "00002"]
+        mask = cv2.imread(
+            str(tmp_path / "images" / "c00" / ".mask" / "00001.png"),
+            cv2.IMREAD_GRAYSCALE)
+        assert mask.shape == (8, 16) and int(mask.min()) == 255   # keeps everything
+
+    def test_masks_that_exist_are_left_alone(self, tmp_path):
+        build_working_set(tmp_path, "clip", ["c00"], ["00001"])
+        assert dataset.fill_missing_masks(tmp_path, "clip", ["c00"]) == []
+        assert (tmp_path / "images" / "c00" / ".mask" / "00001.png").read_bytes() == b"png"
 
 
 class TestRemoveFrames:
     def test_a_removed_frame_is_gone_from_every_tree(self, tmp_path):
         build_working_set(tmp_path, "clip", ["c00", "c01"], ["00001", "00002"])
-        dataset.export_dataset(tmp_path, "clip", ["c00", "c01"])
+        dataset.mirror_masks(tmp_path, "clip", ["c00", "c01"])
         equirect = tmp_path / ".threesixty" / "masks" / "equirect_masks"
         equirect.mkdir(parents=True)
         (equirect / "00002.png").write_bytes(b"png")
@@ -79,21 +110,19 @@ class TestRemoveFrames:
         removed = dataset.remove_frames(tmp_path, "clip", ["00002"])
 
         assert removed.frames == 1 and removed.images == 2 and removed.masks == 2
-        assert removed.exported == 4          # a geometry and a mask file per view
+        assert removed.mirrored == 4          # both names, both cameras
         assert not (tmp_path / "frames" / "00002.jpg").exists()
-        assert not (tmp_path / "images" / "c01" / "00002.jpg").exists()
-        assert not (tmp_path / "masks" / "c00" / "00002.png").exists()
+        assert not (tmp_path / "images" / "c01" / ".geometry" / "00002.jpg").exists()
+        assert not (tmp_path / "images" / "c00" / ".mask" / "00002.png").exists()
         assert not (equirect / "00002.png").exists()
-        assert not (tmp_path / "RC_Dataset" / "view_01" / ".geometry"
-                    / "frame_000002_v01.jpg").exists()
+        assert not (tmp_path / "masks" / "c00" / ".geometry" / "00002.png").exists()
 
     def test_the_other_frames_survive(self, tmp_path):
         build_working_set(tmp_path, "clip", ["c00"], ["00001", "00002", "00003"])
-        dataset.export_dataset(tmp_path, "clip", ["c00"])
-
         dataset.remove_frames(tmp_path, "clip", ["00002"])
 
-        kept = sorted(p.stem for p in (tmp_path / "images" / "c00").glob("*.jpg"))
+        kept = sorted(p.stem for p in
+                      (tmp_path / "images" / "c00" / ".geometry").glob("*.jpg"))
         assert kept == ["00001", "00003"]
 
     def test_a_filename_is_accepted_as_well_as_a_stem(self, tmp_path):
@@ -107,26 +136,21 @@ class TestRemoveFrames:
         assert removed.frames == 0 and removed.images == 0
 
 
-class TestLegacyLayout:
-    """Projects written when the clip was repeated inside the project folder."""
+class TestOlderLayouts:
+    """Datasets written before the clip level went, and before masks moved in."""
 
     def test_lookups_follow_the_layout_that_is_on_disk(self, tmp_path):
         build_working_set(tmp_path, "clip", ["c00"], ["00001"], legacy=True)
 
         assert dataset.frames_dir(tmp_path, "clip") == tmp_path / "frames" / "clip"
-        assert dataset.images_dir(tmp_path, "clip") == tmp_path / "images" / "clip"
-        assert dataset.masks_dir(tmp_path, "clip") == tmp_path / "masks" / "clip"
+        assert dataset.geometry_dir(tmp_path, "clip", "c00")             == tmp_path / "images" / "clip" / "c00"
+        assert dataset.mask_dir(tmp_path, "clip", "c00")             == tmp_path / "masks" / "clip" / "c00"
 
-    def test_a_fresh_project_gets_the_flat_layout(self, tmp_path):
+    def test_a_fresh_project_gets_the_current_layout(self, tmp_path):
         assert dataset.frames_dir(tmp_path, "clip") == tmp_path / "frames"
-        assert dataset.images_dir(tmp_path, "clip") == tmp_path / "images"
+        assert dataset.geometry_dir(tmp_path, "clip", "c00")             == tmp_path / "images" / "c00" / ".geometry"
 
-    def test_a_legacy_dataset_still_exports(self, tmp_path):
-        build_working_set(tmp_path, "clip", ["c00"], ["00001"], legacy=True)
-        result = dataset.export_dataset(tmp_path, "clip", ["c00"])
-        assert result.images == 1 and result.masks == 1
-
-    def test_a_legacy_dataset_still_prunes(self, tmp_path):
+    def test_an_older_dataset_still_prunes(self, tmp_path):
         build_working_set(tmp_path, "clip", ["c00"], ["00001", "00002"], legacy=True)
         removed = dataset.remove_frames(tmp_path, "clip", ["00002"])
         assert removed.frames == 1 and removed.images == 1 and removed.masks == 1

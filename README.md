@@ -447,33 +447,30 @@ Pass `--width`/`--height` to override with a fixed size for every camera.
 ## Output
 
 ```
-dataset/            <- the project folder, named after the clip
-  frames/            00001.jpg  00002.jpg  ...   (the extracted panoramas)
-  images/fwd/        00001.jpg  00002.jpg  ...
-  images/left/       00001.jpg  ...
-  masks/fwd/         00001.png  ...
+dataset/                      <- the project folder, named after the clip
+  frames/                      00001.jpg  00002.jpg  ...   (the panoramas)
+  images/fwd/.geometry/        00001.jpg  00002.jpg  ...   (the tiles)
+  images/fwd/.mask/            00001.png  00002.png  ...
+  images/left/.geometry/       ...
+  masks/fwd/.geometry/         00001.png  00001.jpg.png    (hard links)
 ```
 
-This is the layout Brush and COLMAP both read. Brush pairs an image with its mask by mirroring
-the subpath — `images/a/b/x.jpg` to `masks/a/b/x.png` — and **requires the nested directories to
-match**, which is why masks mirror the image tree rather than sitting in one folder.
+A camera owns one folder holding its images and the masks that go with them.
 
-Camera generation additionally mirrors that working set into an exported tree that names the
-view in every file:
+`masks/` is a **mirror**, built out of hard links, and it exists because neither trainer can be
+pointed anywhere else. Brush pairs `images/<sub>/x.jpg` with `masks/<sub>/x.png`; COLMAP's
+`--ImageReader.mask_path` wants `<sub>/x.jpg.png` — the doubled extension is its documented
+convention, and a mask it cannot find is simply not applied, silently. Both names are written.
 
-```
-dataset/
-  RC_Dataset/view_00/.geometry/  frame_000001_v00.jpg  frame_000002_v00.jpg  ...
-  RC_Dataset/view_00/.mask/      frame_000001_v00.png  ...
-  RC_Dataset/view_01/...
-```
+Filenames stay identical across camera folders, and that is load-bearing: COLMAP's
+`rig_configurator` groups images into *frames* by what is left of the path once a camera's
+`image_prefix` is stripped, so the prefixes are `fwd/.geometry/` and the frame is `00001.jpg`.
+Put the camera in the filename and every image becomes its own frame, dissolving the rig
+constraint that keeps a panoramic tile set from drifting (COLMAP 4.0 has no `image_suffix` to
+strip it back off). See `dataset.py`.
 
-The two trees cannot be one. COLMAP's `rig_configurator` groups images into *frames* by what
-is left of the path once a camera's `image_prefix` is stripped, so every camera's frame N has
-to be called exactly the same thing; putting the view in the filename would give each image its
-own frame and dissolve the rig constraint that keeps a panoramic tile set from drifting (COLMAP
-4.0 has no `image_suffix` to strip it back off). The export is therefore built out of hard
-links — directory entries, not a second copy of the dataset. See `dataset.py`.
+Every image has a mask. Where masking found nothing, a blank one is written — so an absent
+mask never has to stand for both "nothing needed masking" and "masking failed".
 
 Use `--layout flat` for the older shape. Sequence numbers are consistent across cameras —
 the same number always means the same instant, because every camera receives the identical frame

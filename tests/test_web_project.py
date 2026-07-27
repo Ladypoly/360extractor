@@ -327,7 +327,7 @@ class TestTwoStageCapture:
         reopened = Project.load(tmp_path / "proj")
         assert reopened.status("extract") == "done"
         for i in range(2):
-            assert (tmp_path / "proj" / "images" / f"c{i}").is_dir()
+            assert (tmp_path / "proj" / "images" / f"c{i}" / ".geometry").is_dir()
 
     def test_frames_list_and_serving(self, make_ui, tmp_path, equirect_clip):
         source = tmp_path / "drive.mp4"
@@ -573,7 +573,7 @@ class TestFrameRemoval:
         project.sources = ["clip.mp4"]
         project.save()
         build_working_set(project.root, "clip", ["c00", "c01"], ["00001", "00002"])
-        dataset.export_dataset(project.root, "clip", ["c00", "c01"])
+        dataset.mirror_masks(project.root, "clip", ["c00", "c01"])
         return project
 
     def test_removing_a_frame_prunes_every_tree(self, make_ui, tmp_path):
@@ -583,9 +583,9 @@ class TestFrameRemoval:
         status, body = post(base, "/api/frames/remove", {"frames": ["00002"]})
         assert status == 200
         assert body["frames"] == 1 and body["images"] == 2 and body["remaining"] == 1
-        assert not (project.root / "images" / "clip" / "c00" / "00002.jpg").exists()
-        assert not (project.root / "RC_Dataset" / "view_00" / ".geometry"
-                    / "frame_000002_v00.jpg").exists()
+        assert not (project.root / "images" / "c00" / ".geometry" / "00002.jpg").exists()
+        assert not (project.root / "images" / "c00" / ".mask" / "00002.png").exists()
+        assert not (project.root / "masks" / "c00" / ".geometry" / "00002.png").exists()
 
     def test_an_empty_list_is_refused(self, make_ui, tmp_path):
         base, _ = make_ui(self._dataset(tmp_path))

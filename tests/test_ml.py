@@ -45,11 +45,17 @@ class StubBackend:
         self.shape = shape
         self.seen = []
 
+    @staticmethod
+    def _camera(image):
+        """The camera an image belongs to: its folder, or the one above `.geometry`."""
+        folder = Path(image).parent
+        return folder.parent.name if folder.name.startswith(".") else folder.name
+
     def detect(self, images):
         results = []
         for image in images:
             self.seen.append(Path(image))
-            boxes = self.boxes_by_name.get(Path(image).parent.name, [])
+            boxes = self.boxes_by_name.get(self._camera(image), [])
             detections = [ml.Detection("person", 0.9, box) for box in boxes]
             results.append(ml.FrameMasks(
                 path=Path(image),

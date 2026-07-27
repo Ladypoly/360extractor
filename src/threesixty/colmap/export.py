@@ -92,7 +92,7 @@ class ExportPaths:
 
 def build_rig_config(rig: Rig, clip: str, source_width: int,
                      include_intrinsics: bool = True,
-                     prefix: str = "") -> list[dict]:
+                     prefix: str = "", suffix: str = "") -> list[dict]:
     """The `rig_config.json` structure COLMAP's `rig_configurator` reads.
 
     The first enabled camera becomes the reference sensor with an identity pose; every
@@ -100,9 +100,9 @@ def build_rig_config(rig: Rig, clip: str, source_width: int,
     cameras genuinely share one optical centre -- the panorama was sampled from a single
     point, so there is no baseline to model.
 
-    `prefix` is whatever sits above the camera folders inside `images/`. It is empty for
-    the current layout (`images/<camera>/`) and the clip name for datasets written when
-    the clip was repeated inside the project folder.
+    `prefix` and `suffix` bracket the camera name to give the path COLMAP will see below
+    `images/`. Currently that is `<camera>/.geometry/`; older datasets have `<camera>/`,
+    and older ones again repeat the clip above it. `image_prefix` reads which from disk.
     """
     cameras = rig.normalized_cameras()
     if not cameras:
@@ -112,7 +112,7 @@ def build_rig_config(rig: Rig, clip: str, source_width: int,
 
     entries = []
     for index, camera in enumerate(cameras):
-        entry: dict = {"image_prefix": f"{prefix}{camera.name}/"}
+        entry: dict = {"image_prefix": f"{prefix}{camera.name}/{suffix}"}
 
         if index == 0:
             entry["ref_sensor"] = True
@@ -209,14 +209,23 @@ def build_commands(root: Path, has_masks: bool, geo_registration: bool,
     return "\n".join(lines) + "\n"
 
 
-def image_prefix(root: Path, clip: str) -> str:
-    """What sits between `images/` and the camera folders on *this* dataset.
+def image_prefix(root: Path, clip: str) -> tuple[str, str]:
+    """What sits between `images/` and a camera's filenames on *this* dataset.
 
-    Empty now; the clip name on datasets written before that level was dropped.
+    Answered from disk rather than assumed, because three shapes exist: a camera's images
+    live in `<camera>/.geometry/` now, sat directly in `<camera>/` before that, and had
+    the clip repeated above them before that. The prefix has to name whatever is there,
+    and a wrong one means `rig_configurator` matches no images at all.
     """
-    from ..dataset import images_dir
+    from ..dataset import GEOMETRY_DIRNAME, images_dir
+
     resolved = images_dir(root, clip)
-    return f"{clip}/" if resolved.name == clip else ""
+    lead = f"{clip}/" if resolved.name == clip else ""
+    cameras = sorted(p for p in resolved.glob("*") if p.is_dir()) \
+        if resolved.is_dir() else []
+    tail = f"{GEOMETRY_DIRNAME}/" if cameras and (
+        cameras[0] / GEOMETRY_DIRNAME).is_dir() else ""
+    return lead, tail
 
 
 def export(root: str | Path, rig: Rig, clip: str, source_width: int,
@@ -226,10 +235,11 @@ def export(root: str | Path, rig: Rig, clip: str, source_width: int,
     directory = Path(root)
     directory.mkdir(parents=True, exist_ok=True)
 
+    prefix, suffix = image_prefix(directory, clip)
     rig_config = directory / "rig_config.json"
     rig_config.write_text(
         json.dumps(build_rig_config(rig, clip, source_width,
-                                    prefix=image_prefix(directory, clip)),
+                                    prefix=prefix, suffix=suffix),
                    indent=2) + "\n",
         encoding="utf-8")
 

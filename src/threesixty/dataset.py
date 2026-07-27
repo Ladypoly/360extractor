@@ -1,26 +1,33 @@
-"""The dataset as it lands on disk: the exported layout, and pruning frames from it.
+"""Where the dataset lives on disk, and what has to be true about it.
 
-Camera generation produces two views of the same pixels, and they cannot be one tree.
+One layout, not two. Each camera owns a folder holding its images and the masks that go
+with them, side by side, so a camera is a self-contained thing you can look at:
 
-The **working set** is what COLMAP and Brush read: `images/<clip>/<camera>/00001.jpg`
-beside `masks/<clip>/<camera>/00001.png`. Its filenames are deliberately identical
-across camera folders, because COLMAP's `rig_configurator` groups images into *frames*
-by whatever is left of the path once a camera's `image_prefix` is stripped. Put the view
-in the filename and every image becomes its own frame -- which dissolves the rig
-constraint that is the entire reason a panoramic tile set does not drift. (COLMAP 4.0
-has no `image_suffix` to strip it back off; only `image_prefix` exists.)
+    <project>/
+      frames/                    00001.jpg ...          the extracted panoramas
+      images/
+        c00/
+          .geometry/             00001.jpg ...          the tiles
+          .mask/                 00001.png ...          white keeps, black is ignored
+        c01/
+          ...
+      masks/                                            hard links, for the trainers
+        c00/.geometry/           00001.png  00001.jpg.png
 
-The **export** is the layout other tools want, with the view spelled out per file:
+**Filenames stay identical across camera folders.** COLMAP's `rig_configurator` groups
+images into *frames* by whatever is left of the path once a camera's `image_prefix` is
+stripped, so `c00/.geometry/` and `c01/.geometry/` are the prefixes and `00001.jpg` is
+the frame. Putting the camera in the filename would give every image its own frame and
+dissolve the rig constraint that is the entire reason a panoramic tile set does not
+drift. (COLMAP 4.0 has no `image_suffix` to strip it back off; only `image_prefix`.)
 
-    RC_Dataset/
-      view_00/
-        .geometry/frame_000001_v00.jpg
-        .mask/    frame_000001_v00.png
-      view_01/
-        ...
-
-It is built out of hard links, so it costs directory entries rather than a second copy
-of the dataset.
+**`masks/` is a mirror, not a copy.** Both trainers insist on finding masks in a root
+that mirrors the image tree, and neither can be pointed elsewhere: Brush pairs
+`images/<sub>/x.jpg` with `masks/<sub>/x.png`, and COLMAP's `--ImageReader.mask_path`
+wants `<sub>/x.jpg.png` -- note the doubled extension, which is COLMAP's documented
+convention and easy to get silently wrong, because a mask it cannot find is simply not
+applied. Both names are written, as hard links, so the mirror costs directory entries
+rather than a second copy of the dataset.
 """
 
 from __future__ import annotations
@@ -30,24 +37,19 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
-#: The exported tree, at the project root beside `images/` and `masks/`.
-EXPORT_DIRNAME = "RC_Dataset"
-
-#: The subfolders inside each view. Dot-prefixed, which is what the consuming tool
-#: expects -- and conveniently keeps them out of naive image scans.
+#: The two folders inside a camera. Dot-prefixed, which keeps them out of naive image
+#: scans and is what the tools reading this layout expect.
 GEOMETRY_DIRNAME = ".geometry"
 MASK_DIRNAME = ".mask"
 
 
 # -- where things live ------------------------------------------------------
 #
-# A project folder is already named after its clip, so the dataset used to read
-# `Q360_.../images/Q360_.../c01/` -- the clip spelled twice for no reason. The clip level
-# is gone; a project holds one clip and its own name says which.
-#
-# Projects written before that still have it, and re-extracting an 8K source to move some
-# folders is not a reasonable thing to ask, so every lookup falls back to the old shape
-# when it is what is on disk. Writing is always the new shape.
+# Two older shapes exist on disk and both still open. A project folder is already named
+# after its clip, so `Q360_.../images/Q360_.../c01/` spelled it twice; and before that
+# images sat directly in `images/<camera>/` with masks in a separate `masks/<camera>/`.
+# Re-extracting an 8K source to move some folders is not a reasonable thing to ask, so
+# lookups follow whatever is actually there. Writing is always the current shape.
 
 
 def _tree(root: str | Path, name: str, clip: str | None) -> Path:
@@ -67,20 +69,50 @@ def frames_dir(root: str | Path, clip: str | None = None) -> Path:
 
 
 def images_dir(root: str | Path, clip: str | None = None) -> Path:
-    """The parent of the per-camera image folders."""
+    """The parent of the per-camera folders."""
     return _tree(root, "images", clip)
 
 
 def masks_dir(root: str | Path, clip: str | None = None) -> Path:
-    """The parent of the per-camera mask folders."""
+    """The root of the mask mirror the trainers read."""
     return _tree(root, "masks", clip)
 
 
+def camera_dir(root: str | Path, clip: str | None, camera: str) -> Path:
+    return images_dir(root, clip) / camera
+
+
+def geometry_dir(root: str | Path, clip: str | None, camera: str) -> Path:
+    """A camera's images. Falls back to the flat folder on a dataset written before
+    images and masks moved in together."""
+    inside = camera_dir(root, clip, camera)
+    nested = inside / GEOMETRY_DIRNAME
+    if nested.is_dir() or not _has_images(inside):
+        return nested
+    return inside
+
+
+def mask_dir(root: str | Path, clip: str | None, camera: str) -> Path:
+    """A camera's masks, beside its images."""
+    inside = camera_dir(root, clip, camera)
+    nested = inside / MASK_DIRNAME
+    if nested.is_dir() or not _has_images(inside):
+        return nested
+    return masks_dir(root, clip) / camera        # the separate tree, as it used to be
+
+
+#: What the trainers see below `images/` and below `masks/`, for one camera.
+def relative_subpath(root: str | Path, clip: str | None, camera: str) -> str:
+    directory = geometry_dir(root, clip, camera)
+    return directory.relative_to(images_dir(root, clip)).as_posix()
+
+
 @dataclass
-class ExportResult:
-    views: list[Path] = field(default_factory=list)
-    images: int = 0
+class MirrorResult:
+    cameras: list[str] = field(default_factory=list)
     masks: int = 0
+    #: (camera, stem) pairs that had no mask and were given a blank one.
+    filled: list[tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -88,7 +120,7 @@ class RemovalResult:
     frames: int = 0
     images: int = 0
     masks: int = 0
-    exported: int = 0
+    mirrored: int = 0
 
 
 def frame_number(stem: str) -> int:
@@ -97,54 +129,73 @@ def frame_number(stem: str) -> int:
     return int(digits) if digits else 0
 
 
-def export_name(number: int, view: int, suffix: str) -> str:
-    """`frame_000001_v00.jpg` -- the view is in the name, once per file."""
-    return f"frame_{number:06d}_v{view:02d}{suffix}"
+def fill_missing_masks(root: str | Path, clip: str, camera_names) -> list[tuple[str, str]]:
+    """Give every image a mask, inventing a blank one where masking left none.
 
-
-def view_dir(root: str | Path, view: int) -> Path:
-    return Path(root) / EXPORT_DIRNAME / f"view_{view:02d}"
-
-
-def export_dataset(root: str | Path, clip: str, camera_names, on_progress=None
-                   ) -> ExportResult:
-    """Mirror the working set into `RC_Dataset/view_NN/{.geometry,.mask}/`.
-
-    Rebuilt from scratch every time rather than merged: a re-run with fewer frames must
-    not leave the previous run's images behind, silently exporting a dataset that no
-    longer matches the reconstruction.
+    An image with no mask at all is the worst of the three states: the trainers treat
+    that camera inconsistently frame to frame, and nothing downstream can tell "nothing
+    needed masking here" apart from "masking failed here". A blank (all-white) mask says
+    the first out loud; the caller reports the list so the user can decide about the
+    second.
     """
     root = Path(root)
-    names = list(camera_names)
-    result = ExportResult()
+    filled: list[tuple[str, str]] = []
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        return filled
 
-    for index, name in enumerate(names):
-        images = images_dir(root, clip) / name
-        masks = masks_dir(root, clip) / name
-        geometry_dir = _reset(view_dir(root, index) / GEOMETRY_DIRNAME)
-        mask_dir = _reset(view_dir(root, index) / MASK_DIRNAME)
+    for camera in camera_names:
+        images = geometry_dir(root, clip, camera)
+        masks = mask_dir(root, clip, camera)
         if not images.is_dir():
             continue
-        result.views.append(view_dir(root, index))
-
-        for image in sorted(images.iterdir()):
-            if not image.is_file() or image.name.startswith("."):
+        blank = None
+        for image in sorted(images.glob("*.*")):
+            if image.name.startswith("."):
                 continue
-            number = frame_number(image.stem)
-            result.images += _link(
-                image, geometry_dir / export_name(number, index, image.suffix))
-            mask = masks / f"{image.stem}.png"
-            if mask.exists():
-                result.masks += _link(
-                    mask, mask_dir / export_name(number, index, ".png"))
-        if on_progress is not None:
-            on_progress((index + 1) / max(len(names), 1))
+            target = masks / f"{image.stem}.png"
+            if target.exists():
+                continue
+            if blank is None:
+                sample = cv2.imread(str(image))
+                if sample is None:
+                    break
+                blank = np.full(sample.shape[:2], 255, dtype=np.uint8)
+            masks.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(target), blank)
+            filled.append((camera, image.stem))
+    return filled
+
+
+def mirror_masks(root: str | Path, clip: str, camera_names) -> MirrorResult:
+    """Rebuild `masks/` from the per-camera `.mask` folders, for COLMAP and Brush.
+
+    Rebuilt rather than merged: a re-run with fewer frames must not leave the previous
+    run's masks behind, silently masking images that no longer exist.
+    """
+    root = Path(root)
+    result = MirrorResult()
+
+    for camera in camera_names:
+        source = mask_dir(root, clip, camera)
+        subpath = relative_subpath(root, clip, camera)
+        target = _reset(masks_dir(root, clip) / subpath)
+        if not source.is_dir():
+            continue
+        result.cameras.append(camera)
+        for mask in sorted(source.glob("*.png")):
+            # Brush's name, then COLMAP's doubled-extension one, both linked to the same
+            # bytes. Cheaper than choosing, and a mask neither can find is not applied.
+            result.masks += _link(mask, target / mask.name)
+            _link(mask, target / f"{mask.stem}.jpg.png")
 
     return result
 
 
 def remove_frames(root: str | Path, clip: str, stems) -> RemovalResult:
-    """Delete these frames from the working set, the export, and the frame store.
+    """Delete these frames from the dataset, the mirror, and the frame store.
 
     Removal is from `frames/` too, so regenerating cameras does not quietly bring them
     back -- the point of dropping a frame is that it never reaches the reconstruction.
@@ -156,20 +207,17 @@ def remove_frames(root: str | Path, clip: str, stems) -> RemovalResult:
     for stem in wanted:
         for path in _glob(frames_dir(root, clip), f"{stem}.*"):
             removed.frames += _unlink(path)
-        for directory in _subdirs(images_dir(root, clip)):
-            for path in _glob(directory, f"{stem}.*"):
+        for camera in _subdirs(images_dir(root, clip)):
+            name = camera.name
+            for path in _glob(geometry_dir(root, clip, name), f"{stem}.*"):
                 removed.images += _unlink(path)
-        for directory in _subdirs(masks_dir(root, clip)):
-            for path in _glob(directory, f"{stem}.*"):
+            for path in _glob(mask_dir(root, clip, name), f"{stem}.*"):
                 removed.masks += _unlink(path)
         _unlink(root / ".threesixty" / "masks" / "equirect_masks" / f"{stem}.png")
 
-        number = frame_number(stem)
-        for view in _glob(root / EXPORT_DIRNAME, "view_*"):
-            index = frame_number(view.name)
-            for sub in (view / GEOMETRY_DIRNAME, view / MASK_DIRNAME):
-                for path in _glob(sub, export_name(number, index, ".*")):
-                    removed.exported += _unlink(path)
+        for directory in _walk(masks_dir(root, clip)):
+            for path in _glob(directory, f"{stem}.*"):
+                removed.mirrored += _unlink(path)
 
     return removed
 
@@ -197,6 +245,10 @@ def blank_masks(root: str | Path, clip: str) -> list[str]:
 
 
 # -- plumbing ---------------------------------------------------------------
+
+
+def _has_images(directory: Path) -> bool:
+    return any(_glob(directory, pattern) for pattern in ("*.jpg", "*.jpeg", "*.png"))
 
 
 def _reset(directory: Path) -> Path:
@@ -234,3 +286,10 @@ def _glob(directory: Path, pattern: str):
 
 def _subdirs(directory: Path):
     return [p for p in _glob(directory, "*") if p.is_dir()]
+
+
+def _walk(directory: Path):
+    """Every directory at or below this one."""
+    if not directory.is_dir():
+        return []
+    return [directory] + [p for p in directory.rglob("*") if p.is_dir()]

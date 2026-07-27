@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from .ffmpeg import FFmpegError, FFmpegInfo
-from .plan import ExtractPlan, Pass, build_pass_argv
+from .plan import ExtractPlan, Pass, build_pass_argv, safe_stem
 
 ProgressFn = Callable[["Progress"], None]
 
@@ -188,6 +188,15 @@ def run_extraction(
                 job.marker.write_text(
                     f"images={written}\ncamera={job.camera.name}\n", encoding="utf-8"
                 )
+
+    # Masks live beside their images; the trainers read them from a mirrored root.
+    if result.masks_written:
+        from . import dataset
+
+        clip = safe_stem(plan.media.path.stem)
+        names = [job.camera.name for single_pass in plan.passes
+                 for job in single_pass.jobs]
+        dataset.mirror_masks(plan.output_root, clip, names)
 
     result.elapsed = time.monotonic() - started
     return result

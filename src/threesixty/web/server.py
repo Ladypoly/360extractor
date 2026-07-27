@@ -585,13 +585,15 @@ class Handler(BaseHTTPRequestHandler):
         start = project.frames.start or 0.0
 
         entries = {}
-        for camera_dir in sorted(p for p in images_root.iterdir() if p.is_dir()):
-            for image in sorted(camera_dir.iterdir()):
+        # Keyed by the path COLMAP records, which is the image's path below images/.
+        for camera in sorted(p for p in images_root.iterdir() if p.is_dir()):
+            directory = dataset.geometry_dir(project.root, clip, camera.name)
+            for image in sorted(directory.iterdir()):
                 if image.suffix.lower() not in {".jpg", ".jpeg", ".png"}:
                     continue
                 offset = start + (frame_number(image) - 1) / max(per_second, 1e-6)
-                entries[f"{clip}/{camera_dir.name}/{image.name}"] = gps.interpolate(
-                    fixes, fixes[0].time + offset)
+                key = image.relative_to(images_root).as_posix()
+                entries[key] = gps.interpolate(fixes, fixes[0].time + offset)
         return gps.write_geo_registration(entries, project.root / "geo_registration.txt")
 
     def api_splat_clean(self, payload: dict) -> dict:
@@ -1167,7 +1169,7 @@ class Handler(BaseHTTPRequestHandler):
         # Overlay the generated mask for this camera+frame, tinted red, when asked.
         mask = None
         if payload.get("overlay") and frame_name and project:
-            candidate = (dataset.masks_dir(project.root, clip) / name
+            candidate = (dataset.mask_dir(project.root, clip, name)
                          / f"{Path(frame_name).stem}.png")
             if candidate.exists():
                 mask = candidate
@@ -1343,7 +1345,7 @@ class Handler(BaseHTTPRequestHandler):
         remaining = frames.frames_dir(project.root, clip)
         return {
             "frames": removed.frames, "images": removed.images,
-            "masks": removed.masks, "exported": removed.exported,
+            "masks": removed.masks, "mirrored": removed.mirrored,
             "remaining": len(list(remaining.glob("*.jpg"))) if remaining.exists() else 0,
         }
 
@@ -1431,7 +1433,7 @@ class Handler(BaseHTTPRequestHandler):
                     f"(their masks are entirely white)", "warn")
             return {"images": result.images_written, "masks": result.masks_written,
                     "undetected": result.undetected,
-                    "exported": result.exported_images,
+                    "blank_masks": result.blank_masks,
                     "summary": f"{result.images_written} camera images"}
 
         job.start(work, name="generating cameras")

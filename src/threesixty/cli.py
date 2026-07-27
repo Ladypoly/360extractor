@@ -290,13 +290,14 @@ def _write_geo_registration(project, clip: str, gpx_path: str, ffmpeg):
     start = selection.start or 0.0
 
     entries = {}
-    for camera_dir in sorted(p for p in images_root.iterdir() if p.is_dir()):
-        for image in sorted(camera_dir.iterdir()):
+    for camera in sorted(p for p in images_root.iterdir() if p.is_dir()):
+        directory = dataset.geometry_dir(project.root, clip, camera.name)
+        for image in sorted(directory.iterdir()):
             if image.suffix.lower() not in {".jpg", ".jpeg", ".png"}:
                 continue
             number = dynamic_frame_number(image)
             offset = start + (number - 1) / max(per_second, 1e-6)
-            name = f"{clip}/{camera_dir.name}/{image.name}"
+            name = image.relative_to(images_root).as_posix()
             entries[name] = gps.interpolate(fixes, fixes[0].time + offset)
 
     return gps.write_geo_registration(entries, project.root / "geo_registration.txt")

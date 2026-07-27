@@ -129,8 +129,8 @@ class TestPlanning:
         mirror its nested subpaths exactly."""
         plan = plan_extraction(video, ring(2), FrameSelection(), tmp_path, layout="brush")
         directories = {j.directory for p in plan.passes for j in p.jobs}
-        assert directories == {tmp_path / "images" / "c00",
-                               tmp_path / "images" / "c01"}
+        assert directories == {tmp_path / "images" / "c00" / ".geometry",
+                               tmp_path / "images" / "c01" / ".geometry"}
 
     def test_brush_layout_names_frames_identically_across_cameras(self, video, tmp_path):
         """COLMAP groups images into frames by matching filenames across camera
@@ -150,11 +150,12 @@ class TestPlanning:
         patterns = {j.pattern for p in plan.passes for j in p.jobs}
         assert len(patterns) == 3
 
-    def test_mask_directories_mirror_image_directories(self, video, tmp_path):
+    def test_mask_directories_sit_beside_image_directories(self, video, tmp_path):
+        """One folder per camera, holding its images and the masks that go with them."""
         plan = plan_extraction(video, ring(2), FrameSelection(), tmp_path, layout="brush")
         for job in plan.passes[0].jobs:
-            assert job.directory.relative_to(tmp_path / "images") == \
-                   job.mask_directory.relative_to(tmp_path / "masks")
+            assert job.directory.parent == job.mask_directory.parent
+            assert (job.directory.name, job.mask_directory.name) == (".geometry", ".mask")
 
     def test_flat_layout_keeps_the_older_shape(self, video, tmp_path):
         plan = plan_extraction(video, ring(2), FrameSelection(), tmp_path, layout="flat")

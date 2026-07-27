@@ -192,16 +192,31 @@ class TestApplyModes:
             # Brush pairs by matching stem under a mirrored subpath.
             assert {p.stem for p in images} == {p.stem for p in masks}
 
-    def test_mask_paths_mirror_image_paths(self, ffmpeg, equirect_clip, tmp_path):
-        """Brush requires nested mask directories to match nested image directories."""
+    def test_masks_land_beside_their_images(self, ffmpeg, equirect_clip, tmp_path):
+        """A camera owns its images and its masks, in one folder."""
         media = probe_media(equirect_clip, ffmpeg)
         plan = plan_extraction(media, self._rig(), FrameSelection("fps", 1), tmp_path,
                                ffmpeg=ffmpeg, mask_mode="sidecar")
         run_extraction(plan, ffmpeg)
         for job in plan.passes[0].jobs:
-            relative_image = job.directory.relative_to(tmp_path / "images")
-            relative_mask = job.mask_directory.relative_to(tmp_path / "masks")
-            assert relative_image == relative_mask
+            assert job.directory.name == ".geometry"
+            assert job.mask_directory.name == ".mask"
+            assert job.mask_directory.parent == job.directory.parent
+
+    def test_masks_are_mirrored_for_the_trainers(self, ffmpeg, equirect_clip, tmp_path):
+        """COLMAP and Brush both read a mask root mirroring the image tree, and
+        COLMAP wants the doubled extension -- a mask it cannot find is not applied."""
+        media = probe_media(equirect_clip, ffmpeg)
+        plan = plan_extraction(media, self._rig(), FrameSelection("fps", 1), tmp_path,
+                               ffmpeg=ffmpeg, mask_mode="sidecar")
+        run_extraction(plan, ffmpeg)
+
+        for job in plan.passes[0].jobs:
+            for image in job.directory.glob("*.jpg"):
+                mirrored = (tmp_path / "masks"
+                            / job.directory.relative_to(tmp_path / "images"))
+                assert (mirrored / f"{image.stem}.png").exists()       # Brush
+                assert (mirrored / f"{image.stem}.jpg.png").exists()   # COLMAP
 
     def test_untouched_cameras_get_no_masks(self, ffmpeg, equirect_clip, tmp_path):
         """An all-white mask is a no-op that still costs a file per frame."""
