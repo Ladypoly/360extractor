@@ -8,6 +8,7 @@ framework. Binds to localhost only.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import struct
 import subprocess
@@ -91,6 +92,10 @@ class Session:
         #: is what makes the grade sliders usable live.
         self.preview_source: Path | None = None
         self.preview_key: tuple | None = None
+        #: Detection backends, kept alive between requests. Constructing one loads the
+        #: model weights, which is several seconds -- doing that per preview is what made
+        #: scrubbing with the mask overlay unusable.
+        self.backends: dict[tuple, object] = {}
         #: One job per pipeline stage. Replaces the single session-wide job, which
         #: could not tell extraction from detection and blocked both.
         self.jobs = JobRegistry()
@@ -179,8 +184,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._file(target, _static_type(target.name) or "application/octet-stream")
 
-    def _serve_project_frame(self, relative: str) -> None:
-        """Serve an extracted equirect frame so the Capture canvas can show it."""
+    def _serve_project_frame(self, relative: str, width: int = 0) -> None:
+        """Serve an extracted equirect frame so the Capture canvas can show it.
+
+        `?w=` returns a cached copy at that width. Frames come off an 8K source, and
+        shipping (and decoding) all of those pixels for a canvas a fraction of the size
+        is most of what made stepping through them feel slow.
+        """
         project = self.session.project
         if project is None:
             self._json({"error": "no project is open"}, 404)
@@ -189,6 +199,14 @@ class Handler(BaseHTTPRequestHandler):
         if target is None or not target.exists():
             self._json({"error": f"not found: {relative}"}, 404)
             return
+        if width:
+            width = max(min(width, 8192), 64)
+            proxy = self._derived(
+                f"frame|{target}|{target.stat().st_mtime_ns}|{width}", ".jpg")
+            try:
+                target = self._scaled(target, width, width // 2, proxy)
+            except FFmpegError:
+                pass                        # fall back to the original, whole
         self._file(target, "image/jpeg")
 
     def _serve_project_file(self, relative: str) -> None:
@@ -224,12 +242,14 @@ class Handler(BaseHTTPRequestHandler):
             elif route.path.startswith("/splat/"):
                 self._serve_project_file(route.path[len("/splat/"):])
             elif route.path.startswith("/frames/"):
-                self._serve_project_frame(route.path[len("/frames/"):])
+                self._serve_project_frame(route.path[len("/frames/"):],
+                                          int(query.get("w", ["0"])[0] or 0))
             elif route.path.startswith("/preview/"):
                 # Before the generic static handler: these are generated files in the
                 # session cache, and `.jpg` would otherwise be looked for in static/.
                 name = Path(route.path).name
-                self._file(self.session.cache / name, "image/jpeg")
+                self._file(self.session.cache / name,
+                           _static_type(name) or "image/jpeg")
             elif _static_type(route.path):
                 self._serve_static(route.path)
             elif route.path == "/api/presets":
@@ -345,6 +365,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.api_mask_coverage(payload))
             elif route.path == "/api/mask/preview":
                 self._json(self.api_mask_preview(payload))
+            elif route.path == "/api/mask/frame":
+                self._json(self.api_mask_frame(payload))
             elif route.path == "/api/pick":
                 self._json(self.api_pick(payload))
             elif route.path == "/api/cancel":
@@ -807,8 +829,97 @@ class Handler(BaseHTTPRequestHandler):
             raise FFmpegError(f"mask preview failed: {result.stderr.strip()}")
         return {"url": f"/preview/{target.name}", "objects": bool(payload.get("objects"))}
 
+    # -- preview caching --------------------------------------------------
+    #
+    # Everything the canvas asks for repeatedly -- a frame at canvas size, the mask over
+    # it -- is derived from files that do not change. So derive it once, under a name
+    # that is a hash of what produced it, and the second request is a file that is
+    # already there. This is what makes scrubbing feel like scrubbing.
+
+    def _derived(self, key: str, suffix: str) -> Path:
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:20]
+        return self.session.cache / f"d{digest}{suffix}"
+
+    def _scaled(self, source: Path, width: int, height: int, target: Path,
+                sharp: bool = False) -> Path:
+        """A resized copy of `source`, written once. `sharp` keeps a mask binary."""
+        if target.exists():
+            return target
+        argv = [str(self.session.ffmpeg.path), "-hide_banner", "-loglevel", "error", "-y"]
+        if sharp:
+            argv += ["-sws_flags", "neighbor"]
+        argv += ["-i", str(source), "-vf", f"scale={width}:{height}",
+                 "-frames:v", "1", str(target)]
+        result = subprocess.run(argv, capture_output=True, text=True, errors="replace")
+        if result.returncode != 0 or not target.exists():
+            raise FFmpegError(f"resize failed: {result.stderr.strip()}")
+        return target
+
+    def _mask_backend(self, detect: dict):
+        """A detection backend for these settings, built once per session."""
+        from ..mask import ml
+        if not ml.available():
+            raise ValueError('object detection needs the ML extra: pip install -e ".[ml]"')
+        defaults = DetectSettings()
+        key = (detect.get("backend") or defaults.backend,
+               tuple(detect.get("classes") or defaults.classes),
+               float(detect.get("confidence", defaults.confidence)),
+               int(detect.get("dilate", defaults.dilate)),
+               detect.get("device"))
+        with self.session.lock:
+            backend = self.session.backends.get(key)
+        if backend is None:
+            backend = ml.make_backend(key[0], classes=list(key[1]), confidence=key[2],
+                                      dilate=key[3], device=key[4])
+            with self.session.lock:
+                self.session.backends[key] = backend
+        return backend
+
+    def api_mask_frame(self, payload: dict) -> dict:
+        """The ignore-mask for one extracted frame, as a plain image the canvas tints.
+
+        Three ways to answer, cheapest first: the mask camera generation already wrote
+        (when the settings that produced it still hold), one this session has derived
+        before, or a fresh detection run. Only the last is slow, and only once per frame.
+        """
+        project = self._open_project()
+        sources = project.resolved_sources()
+        if not sources:
+            raise ValueError("this project has no source")
+        name = str(payload.get("frame") or "")
+        frame_path = frames.frames_dir(project.root, safe_stem(sources[0].stem)) / name
+        if not name or not frame_path.exists():
+            raise ValueError(f"no such frame: {name}")
+        width = max(int(payload.get("width", 1280)), 64)
+        height = width // 2
+
+        generated = (project.root / ".threesixty" / "masks" / "equirect_masks"
+                     / f"{Path(name).stem}.png")
+        if generated.exists() and project.status("mask") == "done":
+            target = self._derived(
+                f"gen|{generated}|{generated.stat().st_mtime_ns}|{width}", ".png")
+            self._scaled(generated, width, height, target, sharp=True)
+            return {"url": f"/preview/{target.name}", "source": "generated"}
+
+        detect = payload.get("detect") or asdict(project.detect)
+        signature = json.dumps({"detect": detect, "occluders": payload.get("occluders")},
+                               sort_keys=True, default=str)
+        target = self._derived(f"live|{frame_path}|{width}|{signature}", ".png")
+        if target.exists():
+            return {"url": f"/preview/{target.name}", "source": "cached"}
+
+        scaled = self._derived(f"frame|{frame_path}|{width}", ".jpg")
+        self._scaled(frame_path, width, height, scaled)
+        mask = self._preview_mask(scaled, width, height,
+                                  {"objects": True, "detect": detect,
+                                   "occluders": payload.get("occluders") or []},
+                                  out=target)
+        if mask is None:
+            return {"url": None, "empty": True}
+        return {"url": f"/preview/{target.name}", "source": "detected"}
+
     def _preview_mask(self, frame: Path, width: int, height: int,
-                      payload: dict) -> Path | None:
+                      payload: dict, out: Path | None = None) -> Path | None:
         """Build the combined equirect mask (cone/occluders + optional detection) as PNG.
 
         Returns None when nothing would be masked, so the caller shows the plain frame.
@@ -830,17 +941,9 @@ class Handler(BaseHTTPRequestHandler):
         if not want_objects:
             return cone_path
 
-        from ..mask import ml
-        if not ml.available():
-            raise ValueError('object detection needs the ML extra: pip install -e ".[ml]"')
         import numpy as np
 
-        detect = payload.get("detect") or {}
-        backend = ml.make_backend(
-            detect.get("backend", "sam2.1"),
-            classes=detect.get("classes") or list(DetectSettings().classes),
-            confidence=float(detect.get("confidence", 0.25)),
-            dilate=int(detect.get("dilate", 6)))
+        backend = self._mask_backend(payload.get("detect") or {})
         objects = backend.detect([frame])[0].mask     # HxW uint8, white keeps
         combined = np.asarray(objects)
         if cone_path is not None:
@@ -851,7 +954,8 @@ class Handler(BaseHTTPRequestHandler):
             combined = np.minimum(combined, cone)     # stricter of the two wins
 
         import cv2
-        out = self.session.cache / "mask_preview_combined.png"
+        # Named by the caller when the result is being cached; otherwise one scratch file.
+        out = out or (self.session.cache / "mask_preview_combined.png")
         cv2.imwrite(str(out), combined)
         return out
 

@@ -120,7 +120,7 @@ export function StartStage(ctx) {
       .map(([value, label]) => el("option", { value }, label)));
   const maskClasses = el("input", { type: "text",
                                     value: "sky,person,car,bus,truck,motorcycle,bicycle" });
-  const maskConfidence = el("input", { type: "number", min: 0.05, max: 0.95, step: 0.05, value: 0.25 });
+  const maskConfidence = el("input", { type: "number", min: 0.05, max: 0.95, step: 0.05, value: 0.1 });
   const maskDilate = el("input", { type: "number", min: 0, max: 40, step: 1, value: 6 });
   const previewMaskBtn = el("button", { class: "btn", type: "button", onclick: runMaskPreview,
     html: `${icon("inspect", { size: 14 })}<span>Preview masking</span>` });
@@ -202,12 +202,14 @@ export function StartStage(ctx) {
       dropZone.hidden = true;
       previewPane.hidden = false;
 
-      // Opening a source is opening its project, created beside the video.
+      // Opening a source is opening its project, created beside the video. Loading is
+      // not importing: nothing is decoded, masked or extracted until Process is pressed,
+      // and the user stays here to set that up -- so no jump to the project's last stage.
       const { project } = await ctx.api.post("/api/project/for-source", {
         path: data.media.path,
         frames: { mode: frameMode.value, value: parseFloat(frameValue.value) || 2 },
       });
-      ctx.applyProject(project, { keepMedia: true });
+      ctx.applyProject(project, { keepMedia: true, keepStage: true });
       refreshPreview();
     } catch (error) { ctx.report(error); }
   }
@@ -315,7 +317,7 @@ export function StartStage(ctx) {
     return {
       backend: maskBackend.value,
       classes: maskClasses.value.split(",").map((s) => s.trim()).filter(Boolean),
-      confidence: parseFloat(maskConfidence.value) || 0.25,
+      confidence: parseFloat(maskConfidence.value) || 0.1,
       dilate: parseInt(maskDilate.value, 10) || 0,
       exclude_sky: false,   // sky is handled as a detection class now, not the cone
     };
@@ -325,7 +327,7 @@ export function StartStage(ctx) {
     if (!detect) return;
     maskBackend.value = detect.backend || "sam-world";
     maskClasses.value = (detect.classes || []).join(",");
-    maskConfidence.value = detect.confidence != null ? detect.confidence : 0.25;
+    maskConfidence.value = detect.confidence != null ? detect.confidence : 0.1;
     maskDilate.value = detect.dilate != null ? detect.dilate : 6;
   }
 

@@ -61,10 +61,15 @@ class OutputSettings:
 class DetectSettings:
     """Dynamic occluder detection, and the always-on sky exclusion."""
 
-    backend: str = "sam2.1"
+    #: YOLO-World seeds SAM: open-vocabulary detection takes any word (so "sky" works at
+    #: all), and SAM turns its boxes into real outlines -- for sky that means following
+    #: the actual horizon instead of a flat cone across the rooftops.
+    backend: str = "sam-world"
     classes: list[str] = field(default_factory=lambda: [
-        "person", "car", "bus", "truck", "motorcycle", "bicycle"])
-    confidence: float = 0.25
+        "sky", "person", "car", "bus", "truck", "motorcycle", "bicycle"])
+    #: Deliberately low. A missed object is a floater in the splat that nothing
+    #: downstream can remove; a false positive only costs a few masked pixels.
+    confidence: float = 0.1
     dilate: int = 6
     device: str | None = None
     fuse: bool = True

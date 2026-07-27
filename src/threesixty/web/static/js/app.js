@@ -155,7 +155,7 @@ function hideRecent(menu) {
   if (closeRecent) { document.removeEventListener("click", closeRecent); closeRecent = null; }
 }
 
-export function applyProject(project, { keepMedia = false } = {}) {
+export function applyProject(project, { keepMedia = false, keepStage = false } = {}) {
   state.project = project;
   topbar.setProject(project);
   for (const stage of Object.values(stages)) {
@@ -163,9 +163,11 @@ export function applyProject(project, { keepMedia = false } = {}) {
   }
   refreshJobs();
   // Jump to the stage this project was last on (a freshly created one has none, so it
-  // stays where the user is -- Start, mid-import).
+  // stays where the user is -- Start, mid-import). `keepStage` is for loading a source
+  // *into* the tab you are on: picking a video is not the same as opening a project.
   const perProject = projectStageKey(project);
-  const remembered = perProject ? localStorage.getItem(perProject) : null;
+  const remembered = keepStage ? null
+    : (perProject ? localStorage.getItem(perProject) : null);
   goTo(remembered || state.active);
 }
 

@@ -555,3 +555,83 @@ class TestFrameRemoval:
 
         post(base, "/api/frames/remove", {"frames": ["00002"]})
         assert get(base, "/api/project")["project"]["undetected"] == ["00001"]
+
+
+class TestMaskFrameOverlay:
+    """The Capture overlay: a mask per frame, answered from disk wherever possible."""
+
+    def _project_with_frames(self, tmp_path, ffmpeg, equirect_clip):
+        from threesixty.frames import extract_frames, frames_dir
+        from threesixty.ffmpeg import probe_media as probe
+        from threesixty.plan import FrameSelection
+
+        project = Project.create(tmp_path / "p", sources=[str(equirect_clip)])
+        media = probe(equirect_clip, ffmpeg)
+        extract_frames(ffmpeg, media, FrameSelection(mode="fps", value=5.0), project.root)
+        clip = equirect_clip.stem
+        names = sorted(p.name for p in frames_dir(project.root, clip).glob("*.jpg"))
+        return project, names
+
+    def test_a_generated_mask_is_served_without_re_detecting(
+            self, make_ui, ffmpeg, tmp_path, equirect_clip):
+        """Once camera generation has masked a frame, the overlay is a file read --
+        no model, no inference, which is what makes scrubbing bearable."""
+        import subprocess as sp
+
+        project, names = self._project_with_frames(tmp_path, ffmpeg, equirect_clip)
+        equirect = project.root / ".threesixty" / "masks" / "equirect_masks"
+        equirect.mkdir(parents=True)
+        sp.run([str(ffmpeg.path), "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "color=white:size=256x128",
+                "-vf", "drawbox=x=0:y=0:w=256:h=30:color=black:t=fill",
+                "-frames:v", "1", str(equirect / f"{Path(names[0]).stem}.png")],
+               check=True, capture_output=True)
+        project.mark_done("extract", images=1)
+        project.mark_done("mask", masks=1)
+        project.save()
+
+        base, _ = make_ui(project)
+        status, body = post(base, "/api/mask/frame", {"frame": names[0], "width": 256})
+        assert status == 200 and body["source"] == "generated"
+
+        with urllib.request.urlopen(base + body["url"], timeout=30) as response:
+            assert response.read()[:8] == b"\x89PNG\r\n\x1a\n"
+
+    def test_a_stale_mask_is_not_reused(self, make_ui, ffmpeg, tmp_path, equirect_clip):
+        """Masks written under settings that have since changed must not be served as
+        if they still described what would happen."""
+        project, names = self._project_with_frames(tmp_path, ffmpeg, equirect_clip)
+        equirect = project.root / ".threesixty" / "masks" / "equirect_masks"
+        equirect.mkdir(parents=True)
+        (equirect / f"{Path(names[0]).stem}.png").write_bytes(b"not really a png")
+        project.mark_done("extract", images=1)
+        project.mark_done("mask", masks=1)
+        project.detect.confidence = 0.42       # invalidates the mask fingerprint
+        project.save()
+        assert project.status("mask") == "stale"
+
+        base, _ = make_ui(project)
+        status, body = post(base, "/api/mask/frame", {"frame": names[0], "width": 256})
+        # No ML installed in CI -> a clear error rather than the stale file.
+        assert body.get("source") != "generated"
+
+    def test_an_unknown_frame_is_refused(self, make_ui, ffmpeg, tmp_path, equirect_clip):
+        project, _ = self._project_with_frames(tmp_path, ffmpeg, equirect_clip)
+        base, _ = make_ui(project)
+        status, body = post(base, "/api/mask/frame", {"frame": "99999.jpg"})
+        assert status == 400 and "no such frame" in body["error"]
+
+    def test_frames_are_served_at_the_asked_width(
+            self, make_ui, ffmpeg, tmp_path, equirect_clip):
+        """The canvas asks for canvas-sized pixels, not the 8K original."""
+        project, names = self._project_with_frames(tmp_path, ffmpeg, equirect_clip)
+        base, _ = make_ui(project)
+        clip = equirect_clip.stem
+
+        with urllib.request.urlopen(
+                f"{base}/frames/{clip}/{names[0]}?w=256", timeout=30) as response:
+            small = response.read()
+        with urllib.request.urlopen(
+                f"{base}/frames/{clip}/{names[0]}", timeout=30) as response:
+            full = response.read()
+        assert len(small) < len(full)

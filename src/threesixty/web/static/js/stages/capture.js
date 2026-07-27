@@ -26,6 +26,8 @@ const GRADE_FIELDS = {
 
 const PROXY_WIDTH = 560;
 const FULL_WIDTH = 1600;
+//: What the canvas is drawn at, and therefore all a frame or a mask needs to be.
+const CANVAS_WIDTH = 1600;
 
 export function CaptureStage(ctx) {
   const local = {
@@ -33,7 +35,7 @@ export function CaptureStage(ctx) {
     frames: [], frameIndex: 0, clip: null,
     nadir: 0, dragging: null, dragOffset: { yaw: 0, pitch: 0 }, image: null,
     paint: { mode: null, layer: null, brush: 40, drawing: false, last: null, dirty: false },
-    coverage: {}, sizes: {}, undetected: [],
+    coverage: {}, sizes: {}, undetected: [], maskLayer: null, frameToken: 0,
   };
 
   // ── workspace ────────────────────────────────────────────────────────
@@ -44,12 +46,24 @@ export function CaptureStage(ctx) {
   const timeSlider = el("input", { type: "range", min: 0, max: 0, step: 0.1, value: 0,
                                    style: "flex:1" });
   const timeLabel = el("span", { class: "actionbar__detail" }, "0.0s");
-  // Tints the current frame's mask over the panorama on the canvas (live detection).
-  const overlayMasks = el("input", { type: "checkbox" });
+  // Tints the current frame's mask over the panorama on the canvas. On by default:
+  // seeing what will be thrown away is the point of looking at the frame at all.
+  const overlayMasks = el("input", { type: "checkbox", checked: true });
   const overlayToggle = el("label", { class: "overlay-toggle" }, overlayMasks, "overlay masks");
   const timeline = el("div", { class: "log__bar" },
     el("span", {}, "frame"), timeSlider, timeLabel, overlayToggle);
-  overlayMasks.addEventListener("change", () => loadFrame(local.frameIndex));
+  // Toggling only touches the overlay: the frame is already drawn, and the mask for it
+  // is already in hand after the first look, so this is a redraw rather than a reload.
+  overlayMasks.addEventListener("change", async () => {
+    if (!overlayMasks.checked) { local.maskLayer = null; draw(); return; }
+    if (!local.frames.length) return;
+    overlayToggle.classList.add("is-busy");
+    try {
+      local.maskLayer = await maskLayer(local.frames[local.frameIndex]);
+      draw();
+    } catch (error) { ctx.report(error); }
+    finally { overlayToggle.classList.remove("is-busy"); }
+  });
 
   // A frame whose mask came back entirely white had nothing detected on it, so it goes
   // into training unmasked -- one missed car is one floater. Said out loud, above the
@@ -327,6 +341,9 @@ export function CaptureStage(ctx) {
       context2d.fillText("Load a 360 video or still to begin", W / 2, H / 2);
       context2d.textAlign = "left";
     }
+
+    // What will be excluded from the splat, over the frame it was measured on.
+    if (local.maskLayer) context2d.drawImage(local.maskLayer, 0, 0, W, H);
 
     if (local.paint.layer) {
       context2d.save();
@@ -809,9 +826,8 @@ export function CaptureStage(ctx) {
                                        local.media ? local.media.path : "");
       if (!paths.length) return;
       pathField.value = paths[0];
+      // Loading a source is not importing it: extraction waits for Process on Start.
       await loadMedia();
-      // Loading a source opens the extract prompt, unless this project already has frames.
-      if (!local.frames.length) openFramesDialog();
     } catch (error) { ctx.report(error); }
   }
 
@@ -863,15 +879,21 @@ export function CaptureStage(ctx) {
     } catch (error) { ctx.report(error); }
   }
 
+  // Scrubbing loads as you drag now that frames are cached; the debounce keeps a long
+  // drag from queueing one load per pixel.
+  let scrubTimer = null;
   timeSlider.addEventListener("input", () => {
-    if (local.frames.length) {
-      const i = Math.round(parseFloat(timeSlider.value) || 0);
-      timeLabel.textContent = `frame ${i + 1} / ${local.frames.length}`;
-    } else {
+    if (!local.frames.length) {
       timeLabel.textContent = `${(parseFloat(timeSlider.value) || 0).toFixed(1)}s`;
+      return;
     }
+    const index = Math.round(parseFloat(timeSlider.value) || 0);
+    timeLabel.textContent = `frame ${index + 1} / ${local.frames.length}`;
+    clearTimeout(scrubTimer);
+    scrubTimer = setTimeout(() => loadFrame(index), 140);
   });
   timeSlider.addEventListener("change", () => {
+    clearTimeout(scrubTimer);
     if (local.frames.length) loadFrame(Math.round(parseFloat(timeSlider.value) || 0));
     else loadMedia();
   });
@@ -1005,29 +1027,103 @@ export function CaptureStage(ctx) {
     } catch { /* leave the viewer as it is */ }
   }
 
+  // Stepping through frames has to feel like stepping, not like waiting. Three things
+  // buy that: the server sends a canvas-sized copy rather than the 8K original, every
+  // image already fetched stays in memory, and the mask arrives as a plain image this
+  // tints here -- so toggling the overlay never goes back to the server at all.
+  const images = new Map();
+  const tints = new Map();
+
+  function loadImage(url) {
+    const cached = images.get(url);
+    if (cached) return cached;
+    const pending = new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => { images.delete(url); reject(new Error(`cannot load ${url}`)); };
+      img.src = url;
+    });
+    images.set(url, pending);
+    return pending;
+  }
+
+  function frameUrl(name) {
+    return `/frames/${local.clip}/${name}?w=${CANVAS_WIDTH}`;
+  }
+
+  /** The mask as a red layer: opaque where the mask is black, i.e. where it is ignored. */
+  function tintMask(img) {
+    const layer = document.createElement("canvas");
+    layer.width = img.naturalWidth || img.width;
+    layer.height = img.naturalHeight || img.height;
+    const paint = layer.getContext("2d");
+    paint.drawImage(img, 0, 0);
+    const pixels = paint.getImageData(0, 0, layer.width, layer.height);
+    const data = pixels.data;
+    for (let i = 0; i < data.length; i += 4) {
+      const ignored = 255 - data[i];
+      data[i] = 255; data[i + 1] = 45; data[i + 2] = 45;
+      data[i + 3] = ignored * 0.55;
+    }
+    paint.putImageData(pixels, 0, 0);
+    return layer;
+  }
+
+  async function maskLayer(name) {
+    const key = `${name}|${maskSignature()}`;
+    if (tints.has(key)) return tints.get(key);
+    const detect = ctx.state.project ? ctx.state.project.detect : undefined;
+    const { url } = await ctx.api.post("/api/mask/frame",
+                                       { frame: name, width: CANVAS_WIDTH, detect });
+    const layer = url ? tintMask(await loadImage(url)) : null;
+    tints.set(key, layer);
+    return layer;
+  }
+
+  function maskSignature() {
+    const detect = ctx.state.project ? ctx.state.project.detect : null;
+    return detect ? JSON.stringify(detect) : "none";
+  }
+
   async function loadFrame(index) {
     if (!local.frames.length || !local.clip) return;
     local.frameIndex = Math.max(0, Math.min(index, local.frames.length - 1));
     timeSlider.value = local.frameIndex;
     const name = local.frames[local.frameIndex];
+    const token = ++local.frameToken;   // a later frame wins over an in-flight earlier one
 
-    let src = `/frames/${local.clip}/${name}`;
-    if (overlayMasks.checked) {
-      // Live detection on this frame, tinted over the panorama (what will be masked).
-      overlayToggle.classList.add("is-busy");
-      try {
-        const detect = ctx.state.project ? ctx.state.project.detect : undefined;
-        const { url } = await ctx.api.post("/api/mask/preview",
-                                           { frame: name, objects: true, detect });
-        src = url;
-      } catch (error) { ctx.report(error); }
-      finally { overlayToggle.classList.remove("is-busy"); }
-    }
+    try {
+      const img = await loadImage(frameUrl(name));
+      if (token !== local.frameToken) return;
+      local.image = img;
+      local.maskLayer = null;
+      fitCanvas();
+    } catch { /* leave whatever is on the canvas */ }
 
-    const img = new Image();
-    img.onload = () => { local.image = img; fitCanvas(); };
-    img.src = src;
     previewCamera();
+    prefetch(local.frameIndex + 1);
+
+    if (!overlayMasks.checked) { local.maskLayer = null; draw(); return; }
+    overlayToggle.classList.add("is-busy");
+    try {
+      const layer = await maskLayer(name);
+      if (token !== local.frameToken) return;
+      local.maskLayer = layer;
+      draw();
+    } catch (error) {
+      // The overlay is on by default, so a machine without the ML extra would otherwise
+      // report the same failure on every frame. Say it once and switch the overlay off.
+      overlayMasks.checked = false;
+      local.maskLayer = null;
+      draw();
+      ctx.report(error);
+    } finally { overlayToggle.classList.remove("is-busy"); }
+  }
+
+  /** Warm the next frame while the user looks at this one. */
+  function prefetch(index) {
+    if (index < 0 || index >= local.frames.length || !local.clip) return;
+    loadImage(frameUrl(local.frames[index])).catch(() => {});
   }
 
   // FOV/shape are global: a change rewrites every camera, not just the selected one.
@@ -1066,6 +1162,8 @@ export function CaptureStage(ctx) {
       // When a capture job finishes, the working set changed: reload the frame list so
       // the button flips Extract frames -> Generate cameras and the viewer updates.
       if (job && job.state === "done" && lastCaptureState === "running") {
+        // New frames, and new masks over them: everything remembered is now history.
+        images.clear(); tints.clear();
         refreshFrames();
         if (job.result && job.result.undetected) setUndetected(job.result.undetected);
       }
