@@ -171,6 +171,7 @@ export function ReconstructStage(ctx) {
       if (job.state === "running") maybePoll(true);
       else if (job.state === "done") loadPoints();
     },
+    onLeave() { cloud.stop(); },
     onEnter() {
       loadPoints();
       ctx.api.jobs.status("reconstruct").then((job) => {

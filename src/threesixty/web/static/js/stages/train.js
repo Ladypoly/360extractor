@@ -4,13 +4,25 @@ import {
   InspectorSection, LogViewer, MetricStrip, StageActionBar, el, formatCount, formatClock,
 } from "../components.js";
 import { icon } from "../icons.js";
+import { PointCloud } from "../pointcloud.js";
 
 export function TrainStage(ctx) {
   const metrics = MetricStrip();
+
+  // The splat as it is being built, from the exports Brush writes along the way. This
+  // is not decoration: a piped Brush prints nothing at all, so watching the thing
+  // appear is most of what tells you training is alive.
+  const canvas = el("canvas", { class: "pointcloud" });
+  const cloud = PointCloud(canvas);
+  const cloudInfo = el("div", { class: "pointcloud__info" }, "No splat yet");
+  const cloudHost = el("div", { class: "pointcloud__host" }, canvas, cloudInfo);
+
   const log = LogViewer({ title: "Brush output" });
+  log.root.classList.add("log--compact");
   const nextStep = el("div", { style: "padding:0 16px 16px", hidden: true });
 
-  const workspace = el("div", { class: "workspace" }, metrics.root, nextStep, log.root);
+  const workspace = el("div", { class: "workspace" },
+                      metrics.root, cloudHost, nextStep, log.root);
 
   const inspector = el("aside", { class: "inspector" });
 
@@ -89,11 +101,44 @@ export function TrainStage(ctx) {
     }
   }
 
+  // ── splat polling ────────────────────────────────────────────────────
+  let lastMtime = 0;
+  let lastPoll = 0;
+  async function loadSplat() {
+    if (!cloud.ok) return;
+    try {
+      const response = await fetch(`/api/train/points?since=${lastMtime}`);
+      if (response.status !== 200) return;   // 204: nothing newer
+      const buffer = await response.arrayBuffer();
+      lastMtime = new DataView(buffer).getFloat64(0, true);
+      cloud.load(buffer);
+      cloudInfo.textContent = cloud.count
+        ? `${formatCount(cloud.count)} gaussians (sampled)` : "No splat yet";
+    } catch { /* keep what is drawn */ }
+  }
+  function maybePoll(running) {
+    const now = Date.now();
+    // Exports arrive every few thousand steps, so there is nothing to gain from asking
+    // often -- and reading one costs real work on the server.
+    if (running && now - lastPoll < 5000) return;
+    lastPoll = now;
+    loadSplat();
+  }
+
   return {
     panel,
-    onJobs: (job) => { actionBar.render(job); render(job); },
+    onJobs: (job) => {
+      actionBar.render(job);
+      render(job);
+      if (!job) return;
+      if (job.state === "running") { cloud.start(); maybePoll(true); }
+      else if (job.state === "done") loadSplat();
+    },
     onEnter() {
+      cloud.start();
+      loadSplat();
       ctx.api.jobs.status("train").then(render).catch(() => {});
     },
+    onLeave() { cloud.stop(); },
   };
 }

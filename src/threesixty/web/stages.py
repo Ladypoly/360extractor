@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -30,10 +31,10 @@ COLMAP_REGISTERING = ProgressPattern(
 COLMAP_FEATURES = ProgressPattern(
     re.compile(r"Processed file \[(\d+)/(\d+)\]"), message="extracting features")
 
-#: Brush's step counter, as indicatif draws it: `{pos:>7}/{len:7}` inside a repainting
-#: bar, with no words around it. The old pattern insisted on a "step"/"iter" prefix that
-#: is simply not in the output, so the bar never moved -- a bare `N/M` is what to look
-#: for, and the fraction is clamped anyway.
+#: Brush's step counter as indicatif would draw it. Kept for any future build that logs
+#: to a pipe, but it cannot be relied on: measured against this one, a piped Brush emits
+#: **nothing at all** -- indicatif only draws to a terminal -- so training progress is
+#: read from the exported files instead. See `_watch_exports`.
 BRUSH_STEPS = ProgressPattern(
     re.compile(r"(?:step|iter\w*)?\D{0,4}?(\d+)\s*/\s*(\d+)", re.I), message="training")
 
@@ -290,17 +291,19 @@ def run_training(job: Job, project: Project, settings: dict) -> dict:
         argv.append("--with-viewer")
 
     started = time.time()
+    # Brush says nothing at all when its output is piped -- measured, zero bytes in 75
+    # seconds -- because indicatif draws its bar only to a terminal. So progress cannot
+    # be parsed from output that does not exist; it is read from the exports instead,
+    # which is also the thing worth showing.
+    stop = threading.Event()
+    watcher = threading.Thread(
+        target=_watch_exports, args=(job, output, steps, started, stop), daemon=True)
+    watcher.start()
 
-    def estimate(line: str) -> None:
-        # Only show a remaining time once it is worth trusting.
-        if job.fraction > 0.05:
-            elapsed = time.time() - started
-            remaining = elapsed / job.fraction - elapsed
-            job.update(detail=f"elapsed {_clock(elapsed)} · about {_clock(remaining)} left")
-
-    result = run(job, argv, progress=ProgressPattern(BRUSH_STEPS.pattern, total=steps,
-                                                     message="training"),
-                 on_line=estimate, label="training")
+    try:
+        result = run(job, argv, label="training")
+    finally:
+        stop.set()
     if not result.ok:
         raise StageError(f"Brush exited with code {result.returncode}:\n{result.tail(12)}")
 
@@ -314,6 +317,42 @@ def run_training(job: Job, project: Project, settings: dict) -> dict:
         "splats": [str(p) for p in produced],
         "summary": f"trained {steps:,} steps",
     }
+
+
+#: `splat_15000.ply` -> 15000. The step count Brush names its exports by is the only
+#: progress signal it gives a piped caller.
+EXPORT_STEP = re.compile(r"(\d+)")
+
+
+def exported_step(path: Path) -> int:
+    found = EXPORT_STEP.findall(path.stem)
+    return int(found[-1]) if found else 0
+
+
+def _watch_exports(job: Job, output: Path, steps: int, started: float,
+                   stop: threading.Event) -> None:
+    """Report training progress from the files Brush writes as it goes.
+
+    Coarse by nature -- one update per `--export-every` -- but honest, and it moves.
+    A bar that never moves reads as a hang, which is exactly what happened.
+    """
+    seen = -1
+    while not stop.wait(2.0):
+        try:
+            latest = max((exported_step(p) for p in output.glob("*.ply")), default=0)
+        except OSError:
+            continue
+        if latest <= seen:
+            continue
+        seen = latest
+        fraction = max(0.0, min(1.0, latest / max(steps, 1)))
+        elapsed = time.time() - started
+        detail = f"elapsed {_clock(elapsed)}"
+        if fraction > 0.02:
+            detail += f" · about {_clock(elapsed / fraction - elapsed)} left"
+        job.update(fraction=fraction, detail=detail,
+                   message=f"training {latest:,} / {steps:,}")
+        job.log(f"exported {latest:,} steps", "info")
 
 
 def _clock(seconds: float) -> str:

@@ -96,6 +96,9 @@ class Session:
         #: model weights, which is several seconds -- doing that per preview is what made
         #: scrubbing with the mask overlay unusable.
         self.backends: dict[tuple, object] = {}
+        #: (key, positions, colors) for the splat the Train canvas is showing. Reading a
+        #: 300 MB export on every poll would cost more than the training step it reports.
+        self.splat_points: tuple | None = None
         #: One job per pipeline stage. Replaces the single session-wide job, which
         #: could not tell extraction from detection and blocked both.
         self.jobs = JobRegistry()
@@ -288,6 +291,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.api_frames_list())
             elif route.path == "/api/reconstruct/points":
                 self._serve_reconstruct_points(query)
+            elif route.path == "/api/train/points":
+                self._serve_train_points(query)
             elif route.path.startswith("/preview/"):
                 name = Path(route.path).name
                 self._file(self.session.cache / name, "image/jpeg")
@@ -1303,6 +1308,77 @@ class Handler(BaseHTTPRequestHandler):
                 + positions.astype("<f4").tobytes()
                 + colors.astype("<u1").tobytes())
         self._send(200, blob, "application/octet-stream")
+
+    def _serve_train_points(self, query: dict) -> None:
+        """The newest exported splat as the same compact binary the sparse cloud uses.
+
+        Brush exports every few thousand steps, so polling this is how the canvas shows
+        the splat appearing -- and, since a piped Brush says nothing at all, it is most
+        of what tells the user anything is happening.
+
+        Subsampled hard: an export runs to hundreds of megabytes and the viewer only
+        needs a shape.
+        """
+        project = self.session.project
+        newest = None
+        if project is not None:
+            found = stages.trained_splats(project)
+            newest = found[0] if found else None
+        mtime = newest.stat().st_mtime if newest else 0.0
+        since = float(query.get("since", ["0"])[0] or 0)
+        if newest is None or (since and since >= mtime):
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
+        try:
+            positions, colors = self._splat_points(newest, limit=120_000)
+        except Exception:                                  # noqa: BLE001
+            # Brush may be mid-write; skip this poll rather than 500.
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        blob = (struct.pack("<dI", mtime, len(positions))
+                + positions.astype("<f4").tobytes()
+                + colors.astype("<u1").tobytes())
+        self._send(200, blob, "application/octet-stream")
+
+    def _splat_points(self, path: Path, limit: int):
+        """Positions and colours from a gaussian .ply, cached by mtime.
+
+        Colour is the DC spherical-harmonic term, which is the constant part of each
+        gaussian's radiance -- what it looks like ignoring view direction.
+        """
+        import numpy as np
+
+        key = (str(path), path.stat().st_mtime_ns, limit)
+        with self.session.lock:
+            cached = self.session.splat_points
+        if cached is not None and cached[0] == key:
+            return cached[1], cached[2]
+
+        from ..splat import ply
+
+        splats = ply.read(path)
+        data = splats.data
+        count = len(data)
+        step = max(1, count // max(limit, 1))
+        sample = data[::step][:limit]
+
+        positions = np.stack([sample["x"], sample["y"], sample["z"]], axis=1)
+        names = data.dtype.names
+        if all(f"f_dc_{i}" in names for i in range(3)):
+            # SH band 0 -> RGB. 0.28209479 is Y00; the 0.5 recentres it.
+            dc = np.stack([sample[f"f_dc_{i}"] for i in range(3)], axis=1)
+            rgb = np.clip(0.5 + 0.28209479177387814 * dc, 0.0, 1.0) * 255.0
+        else:
+            rgb = np.full((len(sample), 3), 180.0)
+        result = (positions.astype("float32"), rgb.astype("uint8"))
+        with self.session.lock:
+            self.session.splat_points = (key, result[0], result[1])
+        return result
 
     def api_frames_list(self) -> dict:
         """The extracted equirect frames for the open project, for the canvas viewer."""

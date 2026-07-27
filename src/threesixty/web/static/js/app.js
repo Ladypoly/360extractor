@@ -234,6 +234,11 @@ export function goTo(key) {
   }
   pipeline.render({ jobs: state.jobs, readiness: state.readiness,
                     project: state.project, active: key });
+  // A stage that animates (the point cloud, the splat) should stop when it is not on
+  // screen; a requestAnimationFrame loop on a hidden canvas is pure waste.
+  const left = stages[state.previous];
+  if (left && left.onLeave && state.previous !== key) left.onLeave();
+  state.previous = key;
   const entered = stages[key];
   if (entered && entered.onEnter) entered.onEnter();
 }
