@@ -66,7 +66,11 @@ export function Pipeline({ onSelect }) {
       const button = buttons.get(stage.key);
       const job = jobs[stage.key] || {};
       const ready = readiness[stage.key] || { ready: false, reason: "" };
-      const projectStage = project && project.stages ? project.stages[stageToProject(stage.key)] : null;
+      // Start has no project stage of its own; what it produced is the frame store, so
+      // a project reopened later shows the import as done instead of untouched.
+      const projectStage = stage.key === "start"
+        ? (project && project.imported ? "done" : null)
+        : (project && project.stages ? project.stages[stageToProject(stage.key)] : null);
 
       let state = "pending";
       if (job.state === "running") state = "running";

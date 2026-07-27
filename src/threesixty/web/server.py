@@ -405,12 +405,21 @@ class Handler(BaseHTTPRequestHandler):
             "output": asdict(project.output),
             "detect": asdict(project.detect),
             "stages": {name: project.status(name) for name in STAGES},
+            # How much of the import is already on disk, so Start can say "done" on a
+            # project reopened weeks later rather than looking untouched.
+            "imported": self._frame_count(project),
             # Survives a reload, so the "nothing was detected" warning does not vanish
             # just because the page was refreshed after masking.
             "undetected": list(
                 project.stages["mask"].details.get("undetected", []))
             if "mask" in project.stages else [],
         }
+
+    def _frame_count(self, project: Project) -> int:
+        sources = project.resolved_sources()
+        clip = safe_stem(sources[0].stem) if sources else None
+        directory = dataset.frames_dir(project.root, clip)
+        return len(list(directory.glob("*.jpg"))) if directory.is_dir() else 0
 
     def _start(self, stage: str, work, payload: dict) -> dict:
         """Kick off a stage's job, with the project and settings bound in."""

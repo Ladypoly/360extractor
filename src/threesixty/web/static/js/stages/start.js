@@ -6,7 +6,7 @@ import { InspectorSection, StageActionBar, el } from "../components.js";
 import { icon } from "../icons.js";
 
 export function StartStage(ctx) {
-  const local = { media: null };
+  const local = { media: null, imported: 0 };
 
   // ── workspace: the loaded panorama (with a scrubber) or the project hub ─
   const recentList = el("div", { class: "landing__recent" });
@@ -73,8 +73,16 @@ export function StartStage(ctx) {
       .map(([value, label]) => el("option", { value }, label)));
   const frameValue = el("input", { type: "number", value: 2, step: 0.5, min: 0.1 });
   const estimate = el("p", { class: "hint" });
+  // Re-decoding an 8K source takes tens of minutes, so a project that has already been
+  // imported says so and Process leaves it alone unless this is ticked.
+  const reextract = el("input", { type: "checkbox" });
+  const importedNote = el("label", { class: "imported", hidden: true },
+    el("span", { class: "imported__icon", html: icon("done", { size: 14 }) }),
+    el("span", { class: "imported__text" }),
+    el("span", { class: "imported__redo" }, reextract, "re-extract"));
   framesSection.body.append(
-    field("frames", frameMode), field("rate", frameValue), estimate);
+    importedNote, field("frames", frameMode), field("rate", frameValue), estimate);
+  reextract.addEventListener("change", syncImported);
   frameMode.addEventListener("change", () => {
     frameValue.disabled = frameMode.value === "all";
     frameValue.value = frameMode.value === "every" ? 10 : 2;
@@ -214,9 +222,37 @@ export function StartStage(ctx) {
     } catch (error) { ctx.report(error); }
   }
 
+  // ── already imported ─────────────────────────────────────────────────
+  async function refreshImported() {
+    try {
+      const { frames } = await ctx.api.get("/api/frames/list");
+      local.imported = (frames || []).length;
+    } catch { local.imported = 0; }
+    syncImported();
+  }
+
+  function syncImported() {
+    const count = local.imported || 0;
+    importedNote.hidden = count === 0;
+    if (count) {
+      importedNote.querySelector(".imported__text").textContent =
+        `${count} frames already extracted`;
+    }
+    // The sampling controls only mean something for a run that is going to happen.
+    const skipping = count > 0 && !reextract.checked;
+    frameMode.disabled = skipping;
+    frameValue.disabled = skipping || frameMode.value === "all";
+    actionBar.setPrimaryLabel(skipping ? "Continue" : "Process");
+  }
+
   let processing = false, lastState = null;
   async function process() {
-    if (!local.media || !ctx.state.project) {
+    if (!ctx.state.project) {
+      ctx.flash("Load a source first.", { level: "warn" }); return;
+    }
+    // Already imported and not asked to redo it: this is a "carry on", not a re-decode.
+    if (local.imported && !reextract.checked) { ctx.goTo("capture"); return; }
+    if (!local.media) {
       ctx.flash("Load a source first.", { level: "warn" }); return;
     }
     try {
@@ -376,13 +412,15 @@ export function StartStage(ctx) {
       if (local.media) payload.sources = [local.media.path];
       return payload;
     },
-    onEnter: () => refreshRecent(),
+    onEnter: () => { refreshRecent(); refreshImported(); },
     onJobs: (_job, allJobs) => {
       const importing = allJobs.start;
       actionBar.render(importing);
       // When our Process (frame extraction) finishes, move on to the rig.
       if (processing && importing && importing.state === "done" && lastState === "running") {
         processing = false;
+        reextract.checked = false;
+        refreshImported();
         ctx.goTo("capture");
       }
       lastState = importing ? importing.state : null;
@@ -394,6 +432,8 @@ export function StartStage(ctx) {
       writeMasking(project.detect);
       updateEstimate();
       if (project.sources && project.sources.length) pathField.value = project.sources[0];
+      reextract.checked = false;
+      refreshImported();
     },
   };
 }

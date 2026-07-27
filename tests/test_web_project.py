@@ -724,3 +724,26 @@ class TestMaskFrameOverlay:
                 f"{base}/frames/{clip}/{names[0]}", timeout=30) as response:
             full = response.read()
         assert len(small) < len(full)
+
+
+class TestImportedIsReportedBack:
+    """Start has to be able to say "this project is already imported"."""
+
+    def test_a_fresh_project_reports_nothing_imported(self, make_ui, tmp_path):
+        base, _ = make_ui(Project.create(tmp_path / "p"))
+        assert get(base, "/api/project")["project"]["imported"] == 0
+
+    def test_extracted_frames_are_counted(self, make_ui, ffmpeg, tmp_path,
+                                          equirect_clip):
+        from threesixty.frames import extract_frames
+        from threesixty.ffmpeg import probe_media as probe
+        from threesixty.plan import FrameSelection
+
+        project = Project.create(tmp_path / "p", sources=[str(equirect_clip)])
+        media = probe(equirect_clip, ffmpeg)
+        result = extract_frames(ffmpeg, media, FrameSelection(mode="fps", value=5.0),
+                                project.root)
+        base, _ = make_ui(project)
+
+        assert get(base, "/api/project")["project"]["imported"] == result.count
+        assert result.count > 0

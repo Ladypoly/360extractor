@@ -421,6 +421,23 @@ dialog::backdrop { background: rgba(0, 0, 0, .55); }
 .overlay-toggle.is-busy { color: var(--accent); }
 .overlay-toggle.is-busy::after { content: " …"; }
 
+/* ── "this is already done" ───────────────────────────────────────────── */
+
+.imported {
+  display: flex; align-items: center; gap: var(--s2);
+  margin-bottom: var(--s2); padding: var(--s1) var(--s2);
+  border: 1px solid color-mix(in srgb, var(--success) 40%, transparent);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+  font-size: var(--fs-meta);
+}
+.imported__icon { display: flex; flex: 0 0 auto; color: var(--success); }
+.imported__text { flex: 1; min-width: 0; }
+.imported__redo {
+  display: flex; align-items: center; gap: var(--s1); flex: 0 0 auto;
+  color: var(--text-dim); cursor: pointer;
+}
+
 /* ── a banner above the canvas, for something the user has to answer ──── */
 
 .notice {
