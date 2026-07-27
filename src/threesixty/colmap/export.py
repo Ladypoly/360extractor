@@ -171,7 +171,8 @@ def build_commands(root: Path, has_masks: bool, geo_registration: bool,
         "  --ImageReader.single_camera_per_folder 1 \\",
     ]
     if has_masks:
-        lines.append(f"  --ImageReader.mask_path {root_text}/masks \\")
+        lines.append(
+            f"  --ImageReader.mask_path {root_text}/.threesixty/colmap_masks \\")
     lines[-1] = lines[-1].rstrip(" \\")
 
     lines += [

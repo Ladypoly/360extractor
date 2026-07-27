@@ -439,8 +439,9 @@ class Handler(BaseHTTPRequestHandler):
 
         project = self._open_project()
         found = discover(project.root, project.rig)
-        masked = sum(1 for _ in (project.root / "masks").rglob("*.png")) \
-            if (project.root / "masks").exists() else 0
+        # Masks live in each camera's own folder now, which `discover` already resolved.
+        masked = sum(len(list(entry.mask_directory.glob("*.png")))
+                     for entry in found if entry.mask_directory.is_dir())
 
         return {
             "cameras": [{"name": entry.camera.name,

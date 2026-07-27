@@ -11,7 +11,7 @@ with them, side by side, so a camera is a self-contained thing you can look at:
           masks/                 00001.png ...          white keeps, black is ignored
         c01/
           ...
-      masks/                                            hard links, for the trainers
+      .threesixty/colmap_masks/                         hard links, for COLMAP only
         c00/images/              00001.png  00001.jpg.png
 
 **Filenames stay identical across camera folders.** COLMAP's `rig_configurator` groups
@@ -21,12 +21,16 @@ the frame. Putting the camera in the filename would give every image its own fra
 dissolve the rig constraint that is the entire reason a panoramic tile set does not
 drift. (COLMAP 4.0 has no `image_suffix` to strip it back off; only `image_prefix`.)
 
-**`masks/` is a mirror, not a copy.** Both trainers insist on finding masks in a root
-that mirrors the image tree, and neither can be pointed elsewhere: Brush pairs
-`images/<sub>/x.jpg` with `masks/<sub>/x.png`, and COLMAP wants the same thing under
-`--ImageReader.mask_path`. Measured against COLMAP 4.0.2, it accepts either `x.png` or
-`x.jpg.png`; both are written as hard links, so the mirror costs directory entries
-rather than a second copy of the dataset, and neither tool can miss it.
+**Brush reads the masks where they are.** Its documentation asks for "a folder of images
+called 'masks'", and `images/<camera>/masks/` is one, beside the images it belongs to.
+
+**COLMAP cannot.** `--ImageReader.mask_path` is a *root* that has to mirror each image's
+subpath below `--image_path`, so for `c00/images/00001.jpg` it will only ever look for
+`<root>/c00/images/00001.png`. No arrangement of one folder satisfies that and keeps the
+masks beside their images. Since we pass that path ourselves it does not have to be
+anywhere the user looks, so the mirror lives under `.threesixty/`, built from hard links
+-- directory entries, not a second copy. (COLMAP 4.0.2 accepts `x.png` or `x.jpg.png`;
+both names are written so the question cannot come back.)
 """
 
 from __future__ import annotations
@@ -78,8 +82,13 @@ def images_dir(root: str | Path, clip: str | None = None) -> Path:
 
 
 def masks_dir(root: str | Path, clip: str | None = None) -> Path:
-    """The root of the mask mirror the trainers read."""
+    """The old separate mask tree. Only datasets written before masks moved in have one."""
     return _tree(root, "masks", clip)
+
+
+def mirror_dir(root: str | Path) -> Path:
+    """Where COLMAP's mask root is built. Tool-internal: nothing else reads it."""
+    return Path(root) / ".threesixty" / "colmap_masks"
 
 
 def camera_dir(root: str | Path, clip: str | None, camera: str) -> Path:
@@ -174,10 +183,11 @@ def fill_missing_masks(root: str | Path, clip: str, camera_names) -> list[tuple[
 
 
 def mirror_masks(root: str | Path, clip: str, camera_names) -> MirrorResult:
-    """Rebuild `masks/` from the per-camera mask folders, for COLMAP and Brush.
+    """Rebuild COLMAP's mask root from the per-camera mask folders.
 
-    Rebuilt rather than merged: a re-run with fewer frames must not leave the previous
-    run's masks behind, silently masking images that no longer exist.
+    Only COLMAP needs this; Brush reads `images/<camera>/masks/` directly. Rebuilt rather
+    than merged: a re-run with fewer frames must not leave the previous run's masks
+    behind, silently masking images that no longer exist.
     """
     root = Path(root)
     result = MirrorResult()
@@ -185,13 +195,13 @@ def mirror_masks(root: str | Path, clip: str, camera_names) -> MirrorResult:
     for camera in camera_names:
         source = mask_dir(root, clip, camera)
         subpath = relative_subpath(root, clip, camera)
-        target = _reset(masks_dir(root, clip) / subpath)
+        target = _reset(mirror_dir(root) / subpath)
         if not source.is_dir():
             continue
         result.cameras.append(camera)
         for mask in sorted(source.glob("*.png")):
-            # Brush's name, then COLMAP's doubled-extension one, both linked to the same
-            # bytes. Cheaper than choosing, and a mask neither can find is not applied.
+            # Both names COLMAP will accept, linked to the same bytes. Cheaper than
+            # choosing, and a mask it cannot find is not applied.
             result.masks += _link(mask, target / mask.name)
             _link(mask, target / f"{mask.stem}.jpg.png")
 
@@ -219,7 +229,7 @@ def remove_frames(root: str | Path, clip: str, stems) -> RemovalResult:
                 removed.masks += _unlink(path)
         _unlink(root / ".threesixty" / "masks" / "equirect_masks" / f"{stem}.png")
 
-        for directory in _walk(masks_dir(root, clip)):
+        for directory in _walk(mirror_dir(root)) + _walk(masks_dir(root, clip)):
             for path in _glob(directory, f"{stem}.*"):
                 removed.mirrored += _unlink(path)
 

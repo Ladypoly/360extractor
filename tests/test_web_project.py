@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from threesixty import dataset
 from threesixty.project import Project
 from threesixty.web.server import Handler, Session
 
@@ -585,7 +586,8 @@ class TestFrameRemoval:
         assert body["frames"] == 1 and body["images"] == 2 and body["remaining"] == 1
         assert not (project.root / "images" / "c00" / "images" / "00002.jpg").exists()
         assert not (project.root / "images" / "c00" / "masks" / "00002.png").exists()
-        assert not (project.root / "masks" / "c00" / "images" / "00002.png").exists()
+        assert not (dataset.mirror_dir(project.root) / "c00" / "images"
+                    / "00002.png").exists()
 
     def test_an_empty_list_is_refused(self, make_ui, tmp_path):
         base, _ = make_ui(self._dataset(tmp_path))

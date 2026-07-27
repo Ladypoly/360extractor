@@ -50,7 +50,7 @@ class TestMirror:
         build_working_set(tmp_path, "clip", ["c00", "c01"], ["00001", "00002"])
         result = dataset.mirror_masks(tmp_path, "clip", ["c00", "c01"])
 
-        mirror = tmp_path / "masks" / "c00" / "images"
+        mirror = dataset.mirror_dir(tmp_path) / "c00" / "images"
         assert (mirror / "00001.png").exists()          # Brush
         assert (mirror / "00001.jpg.png").exists()      # COLMAP's doubled extension
         assert result.masks == 4                        # one per image, both cameras
@@ -60,7 +60,7 @@ class TestMirror:
         dataset.mirror_masks(tmp_path, "clip", ["c00"])
 
         original = tmp_path / "images" / "c00" / "masks" / "00001.png"
-        mirrored = tmp_path / "masks" / "c00" / "images" / "00001.png"
+        mirrored = dataset.mirror_dir(tmp_path) / "c00" / "images" / "00001.png"
         assert mirrored.stat().st_ino == original.stat().st_ino
 
     def test_a_rerun_with_fewer_frames_leaves_nothing_stale(self, tmp_path):
@@ -70,7 +70,7 @@ class TestMirror:
         (tmp_path / "images" / "c00" / "masks" / "00002.png").unlink()
         dataset.mirror_masks(tmp_path, "clip", ["c00"])
 
-        mirror = tmp_path / "masks" / "c00" / "images"
+        mirror = dataset.mirror_dir(tmp_path) / "c00" / "images"
         assert sorted(p.name for p in mirror.iterdir()) ==             ["00001.jpg.png", "00001.png"]
 
 
@@ -115,7 +115,7 @@ class TestRemoveFrames:
         assert not (tmp_path / "images" / "c01" / "images" / "00002.jpg").exists()
         assert not (tmp_path / "images" / "c00" / "masks" / "00002.png").exists()
         assert not (equirect / "00002.png").exists()
-        assert not (tmp_path / "masks" / "c00" / "images" / "00002.png").exists()
+        assert not (dataset.mirror_dir(tmp_path) / "c00" / "images" / "00002.png").exists()
 
     def test_the_other_frames_survive(self, tmp_path):
         build_working_set(tmp_path, "clip", ["c00"], ["00001", "00002", "00003"])

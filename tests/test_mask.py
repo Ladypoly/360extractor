@@ -213,7 +213,8 @@ class TestApplyModes:
 
         for job in plan.passes[0].jobs:
             for image in job.directory.glob("*.jpg"):
-                mirrored = (tmp_path / "masks"
+                from threesixty import dataset
+                mirrored = (dataset.mirror_dir(tmp_path)
                             / job.directory.relative_to(tmp_path / "images"))
                 assert (mirrored / f"{image.stem}.png").exists()       # Brush
                 assert (mirrored / f"{image.stem}.jpg.png").exists()   # COLMAP

@@ -2,6 +2,7 @@
 
 import pytest
 
+from threesixty import dataset
 from threesixty.cameras import generate_cameras
 from threesixty.ffmpeg import probe_media
 from threesixty.frames import extract_frames, frames_dir
@@ -80,7 +81,7 @@ def test_masks_are_mirrored_where_the_trainers_look(ffmpeg, extracted):
 
     for camera in rig.normalized_cameras():
         images = root / "images" / camera.name / "images"
-        mirror = root / "masks" / camera.name / "images"
+        mirror = dataset.mirror_dir(root) / camera.name / "images"
         for image in images.glob("*.jpg"):
             assert (mirror / f"{image.stem}.png").exists()          # Brush
             assert (mirror / f"{image.stem}.jpg.png").exists()      # COLMAP

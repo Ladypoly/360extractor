@@ -124,7 +124,13 @@ def reconstruction_steps(project: Project, colmap: Path, clip: str,
     """
     root = project.root
     database = root / "database.db"
-    masks = root / "masks"
+    # COLMAP's own mask root, mirrored from each camera's masks/ folder. Brush reads
+    # those directly; only COLMAP needs the mirror. See dataset.py.
+    from .. import dataset
+
+    masks = dataset.mirror_dir(root)
+    if not masks.is_dir():
+        masks = root / "masks"          # a dataset from before masks moved in
 
     extract = [str(colmap), "feature_extractor",
                "--image_path", str(root / "images"),
