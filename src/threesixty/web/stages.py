@@ -375,6 +375,9 @@ def run_cleanup(job: Job, project: Project, settings: dict) -> dict:
         ply.write(removed, removed_path)
         result["cleaned"] = str(cleaned)
         result["removed_file"] = str(removed_path)
+        # Only an applied cleanup is a completed stage; a preview has changed nothing.
+        project.mark_done("clean", removed=report.removed, splat=str(cleaned))
+        project.save()
     else:
         # Preview still writes the removed points, because seeing them is the point.
         job.progress(0.8, "writing the preview of removed points")

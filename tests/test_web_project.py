@@ -86,7 +86,8 @@ class TestProjectEndpoints:
         payload = get(base, "/api/project")["project"]
         assert payload["name"] == "startup"
         assert payload["stages"] == {"extract": "pending", "mask": "pending",
-                                     "export": "pending"}
+                                     "export": "pending", "train": "pending",
+                                     "clean": "pending"}
 
     def test_new_then_open_round_trips(self, make_ui, tmp_path):
         base, _ = make_ui()

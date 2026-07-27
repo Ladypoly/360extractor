@@ -244,3 +244,38 @@ class TestFind:
 
     def test_returns_none_when_there_is_none(self, tmp_path):
         assert find(tmp_path) is None
+
+
+class TestLaterStages:
+    """Training and cleanup are stages too. `mark_done("train")` used to raise -- at the
+    end of a successful run, after the splat had already been written."""
+
+    def test_training_can_be_marked_done(self, tmp_path):
+        project = Project.create(tmp_path / "p")
+        project.mark_done("train", steps=30000, splat="splat_30000.ply")
+        assert project.status("train") == "done"
+        assert project.stages["train"].details["steps"] == 30000
+
+    def test_cleanup_can_be_marked_done(self, tmp_path):
+        project = Project.create(tmp_path / "p")
+        project.mark_done("clean", removed=1234)
+        assert project.status("clean") == "done"
+
+    def test_a_new_reconstruction_makes_the_splat_stale(self, tmp_path):
+        """The splat describes the model under it; redo the model and it no longer does."""
+        project = Project.create(tmp_path / "p")
+        project.mark_done("export")
+        project.mark_done("train", steps=1000)
+        assert project.status("train") == "done"
+
+        project.rig.cameras[0].yaw += 10       # changes extract -> mask -> export
+        project.mark_done("extract")
+        project.mark_done("mask")
+        project.mark_done("export")
+        assert project.status("train") == "pending"   # redoing export cleared it
+
+    def test_stages_round_trip_through_the_file(self, tmp_path):
+        project = Project.create(tmp_path / "p")
+        project.mark_done("train", steps=30000)
+        project.save()
+        assert Project.load(tmp_path / "p").status("train") == "done"

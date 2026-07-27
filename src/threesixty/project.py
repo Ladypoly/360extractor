@@ -28,7 +28,13 @@ from .rig import Rig, RigError, ring
 SCHEMA_VERSION = 1
 PROJECT_FILENAME = "project.json"
 
-STAGES = ("extract", "mask", "export")
+#: Every step whose completion is worth remembering, in the order it invalidates.
+#:
+#: `train` and `clean` belong here as much as the rest: the pipeline has always mapped
+#: its Train and Inspect stages onto them, and leaving them out meant `mark_done("train")`
+#: raised at the end of a successful training run -- after the splat had been written --
+#: and that a reopened project showed Train as untouched.
+STAGES = ("extract", "mask", "export", "train", "clean")
 
 
 class ProjectError(ValueError):
@@ -179,6 +185,14 @@ class Project:
             }
         elif stage == "export":
             payload = {"mask": self.fingerprint("mask")}
+        elif stage == "train":
+            # A splat is stale when the reconstruction under it changed. The training
+            # settings themselves are not stored on the project, so they cannot be part
+            # of this -- retraining with different steps is a deliberate act, not a
+            # staleness the tool should nag about.
+            payload = {"export": self.fingerprint("export")}
+        elif stage == "clean":
+            payload = {"train": self.fingerprint("train")}
         else:
             raise ProjectError(f"unknown stage {stage!r}; expected one of {STAGES}")
 
