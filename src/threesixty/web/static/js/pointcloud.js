@@ -46,6 +46,13 @@ export function PointCloud(canvas) {
     const n = view.getUint32(8, true);
     if (!n) { count = 0; return; }
     const positions = new Float32Array(buffer.slice(12, 12 + n * 12));
+    // COLMAP is OpenCV: +Y points *down*, +Z forward. Drawn as-is the world arrives
+    // upside down. Turning it half a turn about X puts +Y back up -- a proper rotation,
+    // so the scene is not mirrored the way negating one axis alone would leave it.
+    for (let i = 0; i < n; i++) {
+      positions[i * 3 + 1] = -positions[i * 3 + 1];
+      positions[i * 3 + 2] = -positions[i * 3 + 2];
+    }
     const rgb = new Uint8Array(buffer, 12 + n * 12, n * 3);
     const colors = new Float32Array(n * 3);
     for (let i = 0; i < colors.length; i++) colors[i] = rgb[i] / 255;

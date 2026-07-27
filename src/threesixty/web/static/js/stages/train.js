@@ -4,25 +4,23 @@ import {
   InspectorSection, LogViewer, MetricStrip, StageActionBar, el, formatCount, formatClock,
 } from "../components.js";
 import { icon } from "../icons.js";
-import { PointCloud } from "../pointcloud.js";
-
 export function TrainStage(ctx) {
   const metrics = MetricStrip();
 
-  // The splat as it is being built, from the exports Brush writes along the way. This
-  // is not decoration: a piped Brush prints nothing at all, so watching the thing
-  // appear is most of what tells you training is alive.
-  const canvas = el("canvas", { class: "pointcloud" });
-  const cloud = PointCloud(canvas);
-  const cloudInfo = el("div", { class: "pointcloud__info" }, "No splat yet");
-  const cloudHost = el("div", { class: "pointcloud__host" }, canvas, cloudInfo);
+  // The real splat, in the same viewer Inspect uses, loaded from the exports Brush
+  // writes as it goes. Not decoration: a piped Brush prints nothing at all, so watching
+  // the thing take shape is most of what tells you training is alive.
+  const frame = el("iframe", { class: "viewer-frame", src: "about:blank",
+                               title: "Splat being trained" });
+  const viewerInfo = el("div", { class: "pointcloud__info" }, "No export yet");
+  const viewerHost = el("div", { class: "pointcloud__host" }, frame, viewerInfo);
 
   const log = LogViewer({ title: "Brush output" });
   log.root.classList.add("log--compact");
   const nextStep = el("div", { style: "padding:0 16px 16px", hidden: true });
 
   const workspace = el("div", { class: "workspace" },
-                      metrics.root, cloudHost, nextStep, log.root);
+                      metrics.root, viewerHost, nextStep, log.root);
 
   const inspector = el("aside", { class: "inspector" });
 
@@ -101,28 +99,32 @@ export function TrainStage(ctx) {
     }
   }
 
-  // ── splat polling ────────────────────────────────────────────────────
-  let lastMtime = 0;
+  // ── following the exports ────────────────────────────────────────────
+  let shownMtime = 0;
   let lastPoll = 0;
-  async function loadSplat() {
-    if (!cloud.ok) return;
+
+  async function loadLatest() {
     try {
-      const response = await fetch(`/api/train/points?since=${lastMtime}`);
-      if (response.status !== 200) return;   // 204: nothing newer
-      const buffer = await response.arrayBuffer();
-      lastMtime = new DataView(buffer).getFloat64(0, true);
-      cloud.load(buffer);
-      cloudInfo.textContent = cloud.count
-        ? `${formatCount(cloud.count)} gaussians (sampled)` : "No splat yet";
-    } catch { /* keep what is drawn */ }
+      const latest = await ctx.api.get("/api/train/latest");
+      if (!latest.splat) { viewerInfo.textContent = "No export yet"; return; }
+      if (latest.mtime === shownMtime) return;    // already showing this one
+      shownMtime = latest.mtime;
+      const url = `${location.origin}/splat/${latest.splat.split(/[\\/]/).join("/")}`;
+      // Cache-busted, or the viewer would keep showing the export it loaded first.
+      frame.src = `/viewer/?load=${encodeURIComponent(`${url}?v=${latest.mtime}`)}`;
+      viewerInfo.textContent =
+        `${formatCount(latest.step)} steps · ${(latest.bytes / 1e6).toFixed(0)} MB`;
+    } catch { /* keep whatever is loaded */ }
   }
-  function maybePoll(running) {
+
+  function maybePoll() {
+    // An export lands every few thousand steps; asking more often than this only costs
+    // a directory listing, but reloading the viewer is not free, so it is gated on the
+    // file actually changing.
     const now = Date.now();
-    // Exports arrive every few thousand steps, so there is nothing to gain from asking
-    // often -- and reading one costs real work on the server.
-    if (running && now - lastPoll < 5000) return;
+    if (now - lastPoll < 5000) return;
     lastPoll = now;
-    loadSplat();
+    loadLatest();
   }
 
   return {
@@ -131,14 +133,11 @@ export function TrainStage(ctx) {
       actionBar.render(job);
       render(job);
       if (!job) return;
-      if (job.state === "running") { cloud.start(); maybePoll(true); }
-      else if (job.state === "done") loadSplat();
+      if (job.state === "running" || job.state === "done") maybePoll();
     },
     onEnter() {
-      cloud.start();
-      loadSplat();
+      loadLatest();
       ctx.api.jobs.status("train").then(render).catch(() => {});
     },
-    onLeave() { cloud.stop(); },
   };
 }

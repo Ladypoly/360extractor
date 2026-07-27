@@ -750,3 +750,59 @@ class TestImportedIsReportedBack:
 
         assert get(base, "/api/project")["project"]["imported"] == result.count
         assert result.count > 0
+
+
+class TestTrainViewer:
+    """Train follows the exports Brush writes, because a piped Brush says nothing."""
+
+    def _splat(self, path, count=4):
+        """A minimal gaussian .ply -- enough header for the reader, real bytes."""
+        import numpy as np
+
+        fields = ["x", "y", "z", "f_dc_0", "f_dc_1", "f_dc_2", "opacity"]
+        header = ["ply", "format binary_little_endian 1.0", f"element vertex {count}"]
+        header += [f"property float {name}" for name in fields] + ["end_header"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "wb") as handle:
+            handle.write(("\n".join(header) + "\n").encode("ascii"))
+            handle.write(np.zeros((count, len(fields)), dtype="<f4").tobytes())
+        return path
+
+    def test_reports_nothing_before_the_first_export(self, make_ui, tmp_path):
+        base, _ = make_ui(Project.create(tmp_path / "p"))
+        assert get(base, "/api/train/latest")["splat"] is None
+
+    def test_reports_the_newest_export(self, make_ui, tmp_path):
+        import time
+
+        project = Project.create(tmp_path / "p")
+        self._splat(project.root / "splat" / "splat_05000.ply")
+        time.sleep(0.01)
+        self._splat(project.root / "splat" / "splat_10000.ply")
+        base, _ = make_ui(project)
+
+        latest = get(base, "/api/train/latest")
+        assert latest["splat"] == "splat/splat_10000.ply"
+        assert latest["step"] == 10000 and latest["mtime"] > 0
+
+    def test_the_named_file_is_actually_servable(self, make_ui, tmp_path):
+        """The viewer loads it by URL, so the path has to survive the round trip."""
+        project = Project.create(tmp_path / "p")
+        self._splat(project.root / "splat" / "splat_05000.ply")
+        base, _ = make_ui(project)
+
+        latest = get(base, "/api/train/latest")
+        with urllib.request.urlopen(f"{base}/splat/{latest['splat']}", timeout=30) as r:
+            assert r.read()[:3] == b"ply"
+
+    def test_a_cleaned_splat_is_not_offered_as_the_latest(self, make_ui, tmp_path):
+        """Showing the result of a cleanup as the thing still training is a lie."""
+        import time
+
+        project = Project.create(tmp_path / "p")
+        self._splat(project.root / "splat" / "splat_05000.ply")
+        time.sleep(0.01)
+        self._splat(project.root / "splat" / "splat_05000_cleaned.ply")
+        base, _ = make_ui(project)
+
+        assert get(base, "/api/train/latest")["splat"] == "splat/splat_05000.ply"
