@@ -110,8 +110,12 @@ export function TrainStage(ctx) {
       if (latest.mtime === shownMtime) return;    // already showing this one
       shownMtime = latest.mtime;
       const url = `${location.origin}/splat/${latest.splat.split(/[\\/]/).join("/")}`;
-      // Cache-busted, or the viewer would keep showing the export it loaded first.
-      frame.src = `/viewer/?load=${encodeURIComponent(`${url}?v=${latest.mtime}`)}`;
+      // The reload marker goes on the viewer's own URL, never on the file's: SuperSplat
+      // reads the format from the extension, and `.ply?v=123` is not one it knows.
+      // Nothing needs busting anyway -- every response carries no-store, and each export
+      // arrives under a new name. `v` comes *before* `load` so that even a parser that
+      // takes everything after `load=` still gets a clean path.
+      frame.src = `/viewer/?v=${latest.mtime}&load=${encodeURIComponent(url)}`;
       viewerInfo.textContent =
         `${formatCount(latest.step)} steps · ${(latest.bytes / 1e6).toFixed(0)} MB`;
     } catch { /* keep whatever is loaded */ }
