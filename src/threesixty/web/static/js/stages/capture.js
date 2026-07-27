@@ -33,7 +33,7 @@ export function CaptureStage(ctx) {
     frames: [], frameIndex: 0, clip: null,
     nadir: 0, dragging: null, dragOffset: { yaw: 0, pitch: 0 }, image: null,
     paint: { mode: null, layer: null, brush: 40, drawing: false, last: null, dirty: false },
-    coverage: {}, sizes: {},
+    coverage: {}, sizes: {}, undetected: [],
   };
 
   // ── workspace ────────────────────────────────────────────────────────
@@ -51,7 +51,20 @@ export function CaptureStage(ctx) {
     el("span", {}, "frame"), timeSlider, timeLabel, overlayToggle);
   overlayMasks.addEventListener("change", () => loadFrame(local.frameIndex));
 
-  const workspace = el("div", { class: "workspace" }, canvasHost, timeline);
+  // A frame whose mask came back entirely white had nothing detected on it, so it goes
+  // into training unmasked -- one missed car is one floater. Said out loud, above the
+  // canvas, with the only two honest answers: drop those frames, or accept them.
+  const noticeText = el("span", { class: "notice__text" });
+  const noticeRemove = el("button", { class: "btn btn--primary", type: "button",
+                                      onclick: removeUndetected,
+                                      html: `${icon("trash", { size: 14 })}<span>Remove frames</span>` });
+  const noticeKeep = el("button", { class: "btn btn--ghost", type: "button",
+                                    onclick: () => setUndetected([]) }, "Keep them");
+  const notice = el("div", { class: "notice notice--warn", hidden: true },
+    el("span", { class: "notice__icon", html: icon("stale", { size: 16 }) }),
+    noticeText, noticeRemove, noticeKeep);
+
+  const workspace = el("div", { class: "workspace" }, notice, canvasHost, timeline);
 
   // ── inspector ────────────────────────────────────────────────────────
   const inspector = el("aside", { class: "inspector" });
@@ -948,9 +961,35 @@ export function CaptureStage(ctx) {
 
   async function generateCameras() {
     try {
+      setUndetected([]);          // a fresh run answers the question again
       await ctx.api.post("/api/cameras/generate", { rig: local.rig });
       ctx.pokeJobs();
     } catch (error) { ctx.report(error); }
+  }
+
+  function setUndetected(list) {
+    local.undetected = Array.isArray(list) ? list : [];
+    const count = local.undetected.length;
+    notice.hidden = count === 0;
+    if (!count) return;
+    noticeText.textContent =
+      `${formatCount(count)} frame${count === 1 ? "" : "s"} had no detections — `
+      + "their masks are entirely white, so nothing is excluded on those frames.";
+  }
+
+  async function removeUndetected() {
+    const wanted = local.undetected.slice();
+    if (!wanted.length) return;
+    noticeRemove.disabled = true;
+    try {
+      const result = await ctx.api.post("/api/frames/remove", { frames: wanted });
+      ctx.flash(`Removed ${formatCount(wanted.length)} frames `
+                + `(${formatCount(result.images)} images, ${formatCount(result.masks)} masks); `
+                + `${formatCount(result.remaining)} frames left.`, { level: "info" });
+      setUndetected([]);
+      refreshFrames();
+    } catch (error) { ctx.report(error); }
+    finally { noticeRemove.disabled = false; }
   }
 
   async function refreshFrames() {
@@ -1026,7 +1065,10 @@ export function CaptureStage(ctx) {
       actionBar.render(job);
       // When a capture job finishes, the working set changed: reload the frame list so
       // the button flips Extract frames -> Generate cameras and the viewer updates.
-      if (job && job.state === "done" && lastCaptureState === "running") refreshFrames();
+      if (job && job.state === "done" && lastCaptureState === "running") {
+        refreshFrames();
+        if (job.result && job.result.undetected) setUndetected(job.result.undetected);
+      }
       lastCaptureState = job ? job.state : null;
     },
     onEnter: () => { updateLanding(); refreshFrames(); fitCanvas(); },
@@ -1047,6 +1089,7 @@ export function CaptureStage(ctx) {
       occluder.setNote(local.nadir ? `below −${local.nadir}°` : "no cone");
 
       syncRigControls();
+      setUndetected(project.undetected);
       refresh(); refreshCoverage(); updateLanding();
       if (!keepMedia && project.sources && project.sources.length) {
         pathField.value = project.sources[0];

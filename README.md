@@ -457,6 +457,23 @@ This is the layout Brush and COLMAP both read. Brush pairs an image with its mas
 the subpath — `images/a/b/x.jpg` to `masks/a/b/x.png` — and **requires the nested directories to
 match**, which is why masks mirror the image tree rather than sitting in one folder.
 
+Camera generation additionally mirrors that working set into an exported tree that names the
+view in every file:
+
+```
+dataset/
+  RC_Dataset/view_00/.geometry/  frame_000001_v00.jpg  frame_000002_v00.jpg  ...
+  RC_Dataset/view_00/.mask/      frame_000001_v00.png  ...
+  RC_Dataset/view_01/...
+```
+
+The two trees cannot be one. COLMAP's `rig_configurator` groups images into *frames* by what
+is left of the path once a camera's `image_prefix` is stripped, so every camera's frame N has
+to be called exactly the same thing; putting the view in the filename would give each image its
+own frame and dissolve the rig constraint that keeps a panoramic tile set from drifting (COLMAP
+4.0 has no `image_suffix` to strip it back off). The export is therefore built out of hard
+links — directory entries, not a second copy of the dataset. See `dataset.py`.
+
 Use `--layout flat` for the older shape. Sequence numbers are consistent across cameras —
 the same number always means the same instant, because every camera receives the identical frame
 set from one split.

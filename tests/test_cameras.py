@@ -64,6 +64,26 @@ def test_no_occluders_means_no_masks(ffmpeg, extracted):
     assert not (root / "masks").exists()
 
 
+def test_the_exported_layout_mirrors_the_working_set(ffmpeg, extracted):
+    """RC_Dataset is built from the same pixels, with the view spelled out per file."""
+    root, frames = extracted
+    rig = ring(3)
+    result = generate_cameras(ffmpeg, frames, rig, root, sky_cone_angle=30.0)
+
+    views = sorted(p.name for p in (root / "RC_Dataset").iterdir())
+    assert views == ["view_00", "view_01", "view_02"]
+    assert result.exported_images == result.images_written
+    assert result.exported_masks == result.masks_written
+
+    first = sorted(p.stem for p in (root / "images" / "clip" / rig.cameras[0].name)
+                   .glob("*.jpg"))[0]
+    number = int(first)
+    assert (root / "RC_Dataset" / "view_00" / ".geometry"
+            / f"frame_{number:06d}_v00.jpg").exists()
+    assert (root / "RC_Dataset" / "view_00" / ".mask"
+            / f"frame_{number:06d}_v00.png").exists()
+
+
 def test_missing_frames_is_a_clear_error(ffmpeg, tmp_path):
     with pytest.raises(Exception, match="extract frames"):
         generate_cameras(ffmpeg, tmp_path / "frames" / "nope", ring(2), tmp_path)

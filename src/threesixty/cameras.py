@@ -19,6 +19,7 @@ from pathlib import Path
 
 from dataclasses import replace as dc_replace
 
+from . import dataset
 from .ffmpeg import FFmpegError, FFmpegInfo, probe_media
 from .mask import geometric
 from .mask.apply import link_sidecars
@@ -31,6 +32,12 @@ class CamerasResult:
     directories: list[Path] = field(default_factory=list)
     images_written: int = 0
     masks_written: int = 0
+    #: Frames whose detection found nothing at all -- an all-white mask. Worth telling
+    #: the user about rather than shipping: it usually means the model missed a frame
+    #: the neighbouring ones handled, and an unmasked car is a floater.
+    undetected: list[str] = field(default_factory=list)
+    exported_images: int = 0
+    exported_masks: int = 0
     cancelled: bool = False
 
 
@@ -77,11 +84,12 @@ def _sequence(frames_directory: Path) -> tuple[str, int]:
 
 def _detect_equirect_masks(ffmpeg, frames_directory: Path, rig: Rig, detect,
                            sky_cone_angle, work_dir: Path, on_progress, should_cancel):
-    """Detect on each equirect frame and write a per-frame ignore-mask; return its dir.
+    """Detect on each equirect frame and write a per-frame ignore-mask.
 
-    Detection runs on the panorama frames themselves (the two-stage choice), each combined
-    with the static occluders / sky cone. Returns None when there is nothing to detect
-    (no classes or no ML), so the caller falls back to the static-only path.
+    Returns `(directory, frames_with_no_detection)`. Detection runs on the panorama
+    frames themselves (the two-stage choice), each combined with the static occluders /
+    sky cone. Returns None when there is nothing to detect (no classes or no ML), so the
+    caller falls back to the static-only path.
     """
     classes = list(getattr(detect, "classes", []) or [])
     if not classes:
@@ -99,7 +107,7 @@ def _detect_equirect_masks(ffmpeg, frames_directory: Path, rig: Rig, detect,
 
     frames = sorted(frames_directory.glob("*.jpg"))
     if not frames:
-        return None
+        return None, []
     sample = cv2.imread(str(frames[0]))
     height, width = sample.shape[:2]
 
@@ -117,10 +125,15 @@ def _detect_equirect_masks(ffmpeg, frames_directory: Path, rig: Rig, detect,
     out_dir = work_dir / "equirect_masks"
     out_dir.mkdir(parents=True, exist_ok=True)
     total = len(frames)
+    undetected: list[str] = []
     for index, frame in enumerate(frames):
         if should_cancel and should_cancel():
             break
         mask = np.asarray(backend.detect([frame])[0].mask)   # white keeps, black ignores
+        # All white means the model found nothing on this frame. Recorded, not fixed:
+        # only the user can say whether that frame is genuinely empty.
+        if mask.size and int(mask.min()) >= 255:
+            undetected.append(frame.stem)
         if static is not None:
             stationary = static if static.shape == mask.shape else \
                 cv2.resize(static, (mask.shape[1], mask.shape[0]))
@@ -128,7 +141,7 @@ def _detect_equirect_masks(ffmpeg, frames_directory: Path, rig: Rig, detect,
         cv2.imwrite(str(out_dir / f"{frame.stem}.png"), mask)
         if on_progress is not None:
             on_progress((index + 1) / total, index + 1, 0.0)
-    return out_dir
+    return out_dir, undetected
 
 
 def _project_mask_sequence(ffmpeg, mask_sequence_dir: Path, rig: Rig, cameras, sizes,
@@ -166,7 +179,9 @@ def generate_cameras(ffmpeg: FFmpegInfo, frames_directory: str | Path, rig: Rig,
 
     Also writes the matching per-camera mask sidecars so the result is training-ready:
     per-frame detection on the panorama frames when `detect` has classes and ML is
-    installed, otherwise just the static occluders / sky cone.
+    installed, otherwise just the static occluders / sky cone. Finally the working set is
+    mirrored into the exported `RC_Dataset/` layout (`dataset.py` explains why the two
+    trees cannot be one).
     """
     rig.validate()
     frames_directory = Path(frames_directory)
@@ -228,11 +243,14 @@ def generate_cameras(ffmpeg: FFmpegInfo, frames_directory: str | Path, rig: Rig,
 
     written = sum(len(list(directory.glob("*.jpg"))) for directory in directories)
     masks_written = 0
+    undetected: list[str] = []
+    exported = dataset.ExportResult()
     if not cancelled:
         root = Path(output_root)
-        equirect_masks = _detect_equirect_masks(
+        detected = _detect_equirect_masks(
             ffmpeg, frames_directory, rig, detect, sky_cone_angle,
             root / ".threesixty" / "masks", on_mask_progress, should_cancel)
+        equirect_masks, undetected = detected if detected is not None else (None, [])
         if equirect_masks is not None:
             # Per-frame masks (detection): project the whole sequence.
             masks_written = _project_mask_sequence(
@@ -242,5 +260,10 @@ def generate_cameras(ffmpeg: FFmpegInfo, frames_directory: str | Path, rig: Rig,
             # Static only: one rigid mask per camera, linked beside every frame.
             masks_written = _project_masks(ffmpeg, rig, cameras, sizes, directories,
                                            sample, root, clip, sky_cone_angle)
+        # The working set is complete; mirror it into the exported layout.
+        exported = dataset.export_dataset(root, clip,
+                                          [camera.name for camera in cameras])
     return CamerasResult(directories=directories, images_written=written,
-                         masks_written=masks_written, cancelled=cancelled)
+                         masks_written=masks_written, undetected=undetected,
+                         exported_images=exported.images,
+                         exported_masks=exported.masks, cancelled=cancelled)

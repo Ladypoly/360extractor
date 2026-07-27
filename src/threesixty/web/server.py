@@ -36,7 +36,7 @@ from ..project import (
     Project,
     ProjectError,
 )
-from .. import cameras, frames, motion, recent, segment, userpresets
+from .. import cameras, dataset, frames, motion, recent, segment, userpresets
 from ..rig import PRESETS, Camera, Grade, Orientation, Output, Rig, RigError
 
 #: Occluder kinds a global rig preset may carry. `nadir_cone`/`zenith_cone` are angles
@@ -295,6 +295,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.api_extract(payload))
             elif route.path == "/api/frames/extract":
                 self._json(self.api_frames_extract(payload))
+            elif route.path == "/api/frames/remove":
+                self._json(self.api_frames_remove(payload))
             elif route.path == "/api/cameras/generate":
                 self._json(self.api_cameras_generate(payload))
             elif route.path == "/api/job/cancel":
@@ -375,6 +377,11 @@ class Handler(BaseHTTPRequestHandler):
             "output": asdict(project.output),
             "detect": asdict(project.detect),
             "stages": {name: project.status(name) for name in STAGES},
+            # Survives a reload, so the "nothing was detected" warning does not vanish
+            # just because the page was refreshed after masking.
+            "undetected": list(
+                project.stages["mask"].details.get("undetected", []))
+            if "mask" in project.stages else [],
         }
 
     def _start(self, stage: str, work, payload: dict) -> dict:
@@ -1161,6 +1168,39 @@ class Handler(BaseHTTPRequestHandler):
         names = sorted(p.name for p in directory.glob("*.jpg")) if directory.exists() else []
         return {"clip": clip, "frames": names}
 
+    def api_frames_remove(self, payload: dict) -> dict:
+        """Drop frames from the working set, the export, and the frame store.
+
+        Used by the "nothing was detected here" warning: an all-white mask means the
+        frame goes into training unmasked, so the honest options are to re-run detection
+        or to throw the frame away. This is the second.
+        """
+        project = self._open_project()
+        sources = project.resolved_sources()
+        if not sources:
+            raise ValueError("this project has no source")
+        clip = safe_stem(sources[0].stem)
+        wanted = payload.get("frames") or []
+        if not wanted:
+            raise ValueError("no frames were named for removal")
+
+        removed = dataset.remove_frames(project.root, clip, wanted)
+        # Whatever the mask stage recorded about these frames is now history.
+        stage = project.stages.get("mask")
+        if stage is not None:
+            dropped = {Path(str(name)).stem for name in wanted}
+            stage.details["undetected"] = [
+                name for name in stage.details.get("undetected", [])
+                if name not in dropped]
+            project.save()
+
+        remaining = frames.frames_dir(project.root, clip)
+        return {
+            "frames": removed.frames, "images": removed.images,
+            "masks": removed.masks, "exported": removed.exported,
+            "remaining": len(list(remaining.glob("*.jpg"))) if remaining.exists() else 0,
+        }
+
     def api_frames_extract(self, payload: dict) -> dict:
         """Stage A: pull the chosen equirect frames into the project working set.
 
@@ -1233,9 +1273,16 @@ class Handler(BaseHTTPRequestHandler):
             if result.masks_written:
                 # mark_done("extract") cascades a reset of mask/export, so record the
                 # masks produced here after it, not before.
-                project.mark_done("mask", masks=result.masks_written)
+                project.mark_done("mask", masks=result.masks_written,
+                                  undetected=result.undetected)
             project.save()
+            if result.undetected:
+                running_job.log(
+                    f"{len(result.undetected)} frames had no detections at all "
+                    f"(their masks are entirely white)", "warn")
             return {"images": result.images_written, "masks": result.masks_written,
+                    "undetected": result.undetected,
+                    "exported": result.exported_images,
                     "summary": f"{result.images_written} camera images"}
 
         job.start(work, name="generating cameras")

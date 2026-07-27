@@ -504,3 +504,54 @@ class TestPaintedOccluderLocation:
                             {"image": self._painted(ffmpeg, tmp_path)})
         assert status == 200 and body["path"]
         assert str(session.cache) in body["path"]
+
+
+class TestFrameRemoval:
+    """The "nothing was detected on these frames" warning, and acting on it."""
+
+    def _dataset(self, tmp_path):
+        from test_dataset import build_working_set
+        from threesixty import dataset
+
+        project = Project.create(tmp_path / "p")
+        project.sources = ["clip.mp4"]
+        project.save()
+        build_working_set(project.root, "clip", ["c00", "c01"], ["00001", "00002"])
+        dataset.export_dataset(project.root, "clip", ["c00", "c01"])
+        return project
+
+    def test_removing_a_frame_prunes_every_tree(self, make_ui, tmp_path):
+        project = self._dataset(tmp_path)
+        base, _ = make_ui(project)
+
+        status, body = post(base, "/api/frames/remove", {"frames": ["00002"]})
+        assert status == 200
+        assert body["frames"] == 1 and body["images"] == 2 and body["remaining"] == 1
+        assert not (project.root / "images" / "clip" / "c00" / "00002.jpg").exists()
+        assert not (project.root / "RC_Dataset" / "view_00" / ".geometry"
+                    / "frame_000002_v00.jpg").exists()
+
+    def test_an_empty_list_is_refused(self, make_ui, tmp_path):
+        base, _ = make_ui(self._dataset(tmp_path))
+        status, body = post(base, "/api/frames/remove", {"frames": []})
+        assert status == 400 and "no frames" in body["error"]
+
+    def test_the_warning_survives_a_reload(self, make_ui, tmp_path):
+        """A page refresh must not lose the list of frames nothing was detected on."""
+        project = self._dataset(tmp_path)
+        project.mark_done("extract", images=4)
+        project.mark_done("mask", masks=4, undetected=["00002"])
+        project.save()
+        base, _ = make_ui(project)
+
+        assert get(base, "/api/project")["project"]["undetected"] == ["00002"]
+
+    def test_removing_a_frame_clears_it_from_the_warning(self, make_ui, tmp_path):
+        project = self._dataset(tmp_path)
+        project.mark_done("extract", images=4)
+        project.mark_done("mask", masks=4, undetected=["00001", "00002"])
+        project.save()
+        base, _ = make_ui(project)
+
+        post(base, "/api/frames/remove", {"frames": ["00002"]})
+        assert get(base, "/api/project")["project"]["undetected"] == ["00001"]

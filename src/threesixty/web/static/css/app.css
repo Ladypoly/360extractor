@@ -421,6 +421,22 @@ dialog::backdrop { background: rgba(0, 0, 0, .55); }
 .overlay-toggle.is-busy { color: var(--accent); }
 .overlay-toggle.is-busy::after { content: " …"; }
 
+/* ── a banner above the canvas, for something the user has to answer ──── */
+
+.notice {
+  display: flex; align-items: center; gap: var(--s2); flex: 0 0 auto;
+  padding: var(--s2) var(--s3);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-meta);
+}
+.notice__text { flex: 1; min-width: 0; }
+.notice__icon { display: flex; flex: 0 0 auto; }
+.notice--warn {
+  background: color-mix(in srgb, var(--warning) 14%, transparent);
+  color: var(--text);
+}
+.notice--warn .notice__icon { color: var(--warning); }
+
 /* ── reconstruction point cloud ──────────────────────────────────────── */
 
 .pointcloud__host {
