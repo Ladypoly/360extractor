@@ -5,9 +5,10 @@ outlive every project and be there before one is open. Written the same careful 
 as `project.json` -- atomic replace, `utf-8-sig` on read so a hand-edited or
 BOM-carrying file still loads -- because the same Windows encoding trap applies.
 
-Entries are ordered most-recent-first and carry an ``exists`` flag on read rather than
-being pruned: a project on a drive that is currently unplugged should still be listed,
-greyed, not silently forgotten.
+Entries are ordered most-recent-first. Reading the list forgets projects whose folder
+has been deleted -- offering one is offering an error -- but keeps a project whose
+*volume* is simply not mounted, greyed via the ``exists`` flag. An unplugged drive is a
+different thing from a deleted folder: one comes back, the other does not.
 """
 
 from __future__ import annotations
@@ -68,10 +69,44 @@ def remove(root: str | os.PathLike[str]) -> None:
     _write([e for e in _read_raw() if e.get("root") != key])
 
 
+def _volume_available(root: Path) -> bool:
+    """Is the drive or network share this path lives on reachable at all?
+
+    The whole point of the distinction: `E:\\shoot\\clip` missing while `E:\\` is there
+    means someone deleted the project; both missing means the drive is unplugged.
+    """
+    anchor = root.anchor
+    if not anchor:
+        return True
+    try:
+        return Path(anchor).exists()
+    except OSError:
+        return False
+
+
 def entries() -> list[dict]:
-    """The list, newest first, each tagged with whether its folder still exists."""
-    result = []
+    """The list, newest first, each tagged with whether its folder still exists.
+
+    Deleted projects are dropped here *and* from the file, so the list heals itself
+    without the user ever being shown a row that cannot be opened.
+    """
+    kept: list[dict] = []
+    result: list[dict] = []
+    pruned = False
+
     for entry in _read_raw():
-        root = entry.get("root", "")
-        result.append({**entry, "exists": bool(root) and Path(root).exists()})
+        root = str(entry.get("root", ""))
+        if not root:
+            pruned = True
+            continue
+        path = Path(root)
+        exists = path.exists()
+        if not exists and _volume_available(path):
+            pruned = True            # the drive is there, the project is not: gone
+            continue
+        kept.append(entry)
+        result.append({**entry, "exists": exists})
+
+    if pruned:
+        _write(kept)
     return result

@@ -234,6 +234,45 @@ class TestRecentProjects:
         assert status == 200
         assert body["recent"] == []
 
+    def test_a_deleted_project_stops_being_offered(self, make_ui, tmp_path):
+        """Listing a folder that is gone is offering the user an error."""
+        Project.create(tmp_path / "a", name="alpha")
+        Project.create(tmp_path / "b", name="beta")
+        base, _ = make_ui()
+        post(base, "/api/project/open", {"path": str(tmp_path / "a")})
+        post(base, "/api/project/open", {"path": str(tmp_path / "b")})
+
+        shutil.rmtree(tmp_path / "a")
+
+        recent = get(base, "/api/recent")["recent"]
+        assert [e["name"] for e in recent] == ["beta"]
+
+    def test_forgetting_is_written_back(self, make_ui, tmp_path):
+        """The pruning heals the file, not just the one response."""
+        from threesixty import recent as recent_store
+
+        Project.create(tmp_path / "a", name="alpha")
+        base, _ = make_ui()
+        post(base, "/api/project/open", {"path": str(tmp_path / "a")})
+        shutil.rmtree(tmp_path / "a")
+
+        get(base, "/api/recent")
+        assert recent_store._read_raw() == []
+
+    def test_an_unmounted_drive_is_kept_greyed(self, make_ui, tmp_path, monkeypatch):
+        """An unplugged drive is not a deleted project: it comes back."""
+        from threesixty import recent as recent_store
+
+        Project.create(tmp_path / "a", name="alpha")
+        base, _ = make_ui()
+        post(base, "/api/project/open", {"path": str(tmp_path / "a")})
+        shutil.rmtree(tmp_path / "a")
+        monkeypatch.setattr(recent_store, "_volume_available", lambda path: False)
+
+        recent = get(base, "/api/recent")["recent"]
+        assert [e["name"] for e in recent] == ["alpha"]
+        assert recent[0]["exists"] is False
+
 
 class TestTwoStageCapture:
     def _wait(self, base, timeout=120):
