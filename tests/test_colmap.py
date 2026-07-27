@@ -248,9 +248,17 @@ class TestRigConfig:
         assert all("cam_from_rig_rotation" in c for c in cameras[1:])
 
     def test_image_prefixes_match_the_written_layout(self):
+        """The project folder is already named after the clip, so images/ holds the
+        camera folders directly and the prefix is just the camera."""
         config = export.build_rig_config(ring(3), "myclip", 4096)
         prefixes = [c["image_prefix"] for c in config[0]["cameras"]]
-        assert prefixes == ["myclip/c00/", "myclip/c01/", "myclip/c02/"]
+        assert prefixes == ["c00/", "c01/", "c02/"]
+
+    def test_a_legacy_dataset_keeps_its_clip_level_in_the_prefix(self):
+        """Datasets written before the clip level was dropped must still configure."""
+        config = export.build_rig_config(ring(2), "myclip", 4096, prefix="myclip/")
+        prefixes = [c["image_prefix"] for c in config[0]["cameras"]]
+        assert prefixes == ["myclip/c00/", "myclip/c01/"]
 
     def test_translations_are_zero(self):
         """The cameras genuinely share one optical centre: no baseline to model."""

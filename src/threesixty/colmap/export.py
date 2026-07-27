@@ -14,7 +14,7 @@ Two conventions have to be bridged, and both are easy to get silently wrong:
   reflection is real, expected, and cancels before anything reaches COLMAP.
 * **Filenames.** COLMAP groups images into frames by *matching filenames across camera
   folders*, so every camera's frame N must be called the same thing. That is why the
-  brush layout names files `00001.jpg` inside `<clip>/<camera>/` rather than embedding
+  brush layout names files `00001.jpg` inside `images/<camera>/` rather than embedding
   the camera in the filename.
 """
 
@@ -91,13 +91,18 @@ class ExportPaths:
 
 
 def build_rig_config(rig: Rig, clip: str, source_width: int,
-                     include_intrinsics: bool = True) -> list[dict]:
+                     include_intrinsics: bool = True,
+                     prefix: str = "") -> list[dict]:
     """The `rig_config.json` structure COLMAP's `rig_configurator` reads.
 
     The first enabled camera becomes the reference sensor with an identity pose; every
     other camera is posed relative to it. Translations are all zero because these
     cameras genuinely share one optical centre -- the panorama was sampled from a single
     point, so there is no baseline to model.
+
+    `prefix` is whatever sits above the camera folders inside `images/`. It is empty for
+    the current layout (`images/<camera>/`) and the clip name for datasets written when
+    the clip was repeated inside the project folder.
     """
     cameras = rig.normalized_cameras()
     if not cameras:
@@ -107,7 +112,7 @@ def build_rig_config(rig: Rig, clip: str, source_width: int,
 
     entries = []
     for index, camera in enumerate(cameras):
-        entry: dict = {"image_prefix": f"{clip}/{camera.name}/"}
+        entry: dict = {"image_prefix": f"{prefix}{camera.name}/"}
 
         if index == 0:
             entry["ref_sensor"] = True
@@ -204,6 +209,16 @@ def build_commands(root: Path, has_masks: bool, geo_registration: bool,
     return "\n".join(lines) + "\n"
 
 
+def image_prefix(root: Path, clip: str) -> str:
+    """What sits between `images/` and the camera folders on *this* dataset.
+
+    Empty now; the clip name on datasets written before that level was dropped.
+    """
+    from ..dataset import images_dir
+    resolved = images_dir(root, clip)
+    return f"{clip}/" if resolved.name == clip else ""
+
+
 def export(root: str | Path, rig: Rig, clip: str, source_width: int,
            has_masks: bool = True, geo_registration: bool = False,
            colmap: str = "colmap") -> ExportPaths:
@@ -213,7 +228,9 @@ def export(root: str | Path, rig: Rig, clip: str, source_width: int,
 
     rig_config = directory / "rig_config.json"
     rig_config.write_text(
-        json.dumps(build_rig_config(rig, clip, source_width), indent=2) + "\n",
+        json.dumps(build_rig_config(rig, clip, source_width,
+                                    prefix=image_prefix(directory, clip)),
+                   indent=2) + "\n",
         encoding="utf-8")
 
     cameras_path = write_cameras_text(build_cameras(rig, source_width),

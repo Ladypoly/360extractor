@@ -190,12 +190,18 @@ class Handler(BaseHTTPRequestHandler):
         `?w=` returns a cached copy at that width. Frames come off an 8K source, and
         shipping (and decoding) all of those pixels for a canvas a fraction of the size
         is most of what made stepping through them feel slow.
+
+        Only the filename is used, so `/frames/00001.jpg` and the older
+        `/frames/<clip>/00001.jpg` both land on whichever layout the project has.
         """
         project = self.session.project
         if project is None:
             self._json({"error": "no project is open"}, 404)
             return
-        target = self._safe_join(project.root / "frames", relative)
+        sources = project.resolved_sources()
+        clip = safe_stem(sources[0].stem) if sources else None
+        target = self._safe_join(dataset.frames_dir(project.root, clip),
+                                 Path(relative).name)
         if target is None or not target.exists():
             self._json({"error": f"not found: {relative}"}, 404)
             return
@@ -562,7 +568,7 @@ class Handler(BaseHTTPRequestHandler):
         from ..mask.dynamic import frame_number
 
         fixes = gps.read_gpx(gpx)
-        images_root = project.root / "images" / clip
+        images_root = dataset.images_dir(project.root, clip)
         if not images_root.exists():
             raise ValueError(f"{images_root} does not exist; extract first")
 
@@ -1152,7 +1158,7 @@ class Handler(BaseHTTPRequestHandler):
         # Overlay the generated mask for this camera+frame, tinted red, when asked.
         mask = None
         if payload.get("overlay") and frame_name and project:
-            candidate = (project.root / "masks" / clip / name
+            candidate = (dataset.masks_dir(project.root, clip) / name
                          / f"{Path(frame_name).stem}.png")
             if candidate.exists():
                 mask = candidate

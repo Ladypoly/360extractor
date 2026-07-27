@@ -129,8 +129,8 @@ class TestPlanning:
         mirror its nested subpaths exactly."""
         plan = plan_extraction(video, ring(2), FrameSelection(), tmp_path, layout="brush")
         directories = {j.directory for p in plan.passes for j in p.jobs}
-        assert directories == {tmp_path / "images" / "clip" / "c00",
-                               tmp_path / "images" / "clip" / "c01"}
+        assert directories == {tmp_path / "images" / "c00",
+                               tmp_path / "images" / "c01"}
 
     def test_brush_layout_names_frames_identically_across_cameras(self, video, tmp_path):
         """COLMAP groups images into frames by matching filenames across camera

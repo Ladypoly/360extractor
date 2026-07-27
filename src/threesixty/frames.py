@@ -3,7 +3,7 @@
 The capture flow is two stages: choose *which frames*, then choose *which cameras*. This
 module is the first half. It decodes the video once, thins it to the chosen frames (fps /
 sharpest-per-second / every-Nth / all), and writes the panorama frames straight to
-``frames/<clip>/`` -- no rig, no projection, no grade. Those belong to Stage B, applied
+``frames/`` -- no rig, no projection, no grade. Those belong to Stage B, applied
 when the equirect frames become camera tiles, so the working set stays a neutral source of
 truth the user can re-rig and re-mask without decoding the video again.
 """
@@ -16,8 +16,11 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import sharp
+from .dataset import frames_dir
 from .ffmpeg import FFmpegError, FFmpegInfo, MediaInfo
 from .plan import FrameSelection, safe_stem
+
+__all__ = ["FramesResult", "extract_frames", "frames_dir"]
 
 
 @dataclass
@@ -28,16 +31,11 @@ class FramesResult:
     cancelled: bool = False
 
 
-def frames_dir(root: str | Path, clip: str) -> Path:
-    """Where a clip's extracted equirect frames live inside a project."""
-    return Path(root) / "frames" / clip
-
-
 def extract_frames(ffmpeg: FFmpegInfo, media: MediaInfo, selection: FrameSelection,
                    output_root: str | Path, quality: int = 2,
                    on_progress=None, on_analysis=None, should_cancel=None,
                    overwrite: bool = True) -> FramesResult:
-    """Decode `media`, thin to `selection`, write equirect JPEGs to frames/<clip>/."""
+    """Decode `media`, thin to `selection`, write equirect JPEGs to frames/."""
     selection.validate()
 
     # Sharp mode needs a decode pass to score frames before it can name the ones to keep.

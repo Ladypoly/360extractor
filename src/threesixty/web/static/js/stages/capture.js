@@ -719,7 +719,7 @@ export function CaptureStage(ctx) {
   }
 
   async function gradedFrameUrl(name, width) {
-    if (gradeIsNeutral()) return `/frames/${local.clip}/${name}?w=${width}`;
+    if (gradeIsNeutral()) return `/frames/${name}?w=${width}`;
     const { url } = await ctx.api.post("/api/preview/grade",
                                        { frame: name, grade: readGrade(), width });
     return url;
@@ -1068,7 +1068,7 @@ export function CaptureStage(ctx) {
   }
 
   function frameUrl(name) {
-    return `/frames/${local.clip}/${name}?w=${CANVAS_WIDTH}`;
+    return `/frames/${name}?w=${CANVAS_WIDTH}`;
   }
 
   /** The mask as a red layer: opaque where the mask is black, i.e. where it is ignored. */

@@ -12,7 +12,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import __version__
+from . import __version__, dataset
 from .extract import (
     ExtractResult,
     clear_markers,
@@ -280,7 +280,7 @@ def _write_geo_registration(project, clip: str, gpx_path: str, ffmpeg):
     from .colmap import export as colmap_export
 
     fixes = gps.read_gpx(gpx_path)
-    images_root = project.root / "images" / clip
+    images_root = dataset.images_dir(project.root, clip)
     if not images_root.exists():
         raise ValueError(f"{images_root} does not exist; extract before exporting")
 

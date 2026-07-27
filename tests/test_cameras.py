@@ -26,7 +26,7 @@ def test_generates_a_tile_folder_per_camera(ffmpeg, extracted):
     assert result.images_written > 0
     assert not result.cancelled
     for camera in rig.normalized_cameras():
-        camera_dir = root / "images" / "clip" / camera.name
+        camera_dir = root / "images" / camera.name
         assert camera_dir.is_dir() and any(camera_dir.glob("*.jpg"))
 
 
@@ -36,7 +36,7 @@ def test_frame_numbers_match_across_cameras(ffmpeg, extracted):
     rig = ring(3)
     generate_cameras(ffmpeg, frames, rig, root)
 
-    listings = [sorted(p.name for p in (root / "images" / "clip" / c.name).glob("*.jpg"))
+    listings = [sorted(p.name for p in (root / "images" / c.name).glob("*.jpg"))
                 for c in rig.normalized_cameras()]
     assert all(names == listings[0] for names in listings)
     assert len(listings[0]) >= 1
@@ -50,8 +50,8 @@ def test_sky_cone_writes_mask_sidecars(ffmpeg, extracted):
 
     assert result.masks_written > 0
     for camera in rig.normalized_cameras():
-        image_dir = root / "images" / "clip" / camera.name
-        mask_dir = root / "masks" / "clip" / camera.name
+        image_dir = root / "images" / camera.name
+        mask_dir = root / "masks" / camera.name
         images = sorted(p.stem for p in image_dir.glob("*.jpg"))
         masks = sorted(p.stem for p in mask_dir.glob("*.png"))
         assert masks == images and images       # a mask per image, same stems
@@ -75,7 +75,7 @@ def test_the_exported_layout_mirrors_the_working_set(ffmpeg, extracted):
     assert result.exported_images == result.images_written
     assert result.exported_masks == result.masks_written
 
-    first = sorted(p.stem for p in (root / "images" / "clip" / rig.cameras[0].name)
+    first = sorted(p.stem for p in (root / "images" / rig.cameras[0].name)
                    .glob("*.jpg"))[0]
     number = int(first)
     assert (root / "RC_Dataset" / "view_00" / ".geometry"

@@ -1,6 +1,6 @@
 """Stage B of capture: project extracted equirect frames into camera tiles.
 
-Stage A left a neutral working set of panorama frames in ``frames/<clip>/``. This is the
+Stage A left a neutral working set of panorama frames in ``frames/``. This is the
 second half: read that image sequence, apply the grade, and fan it out to one rectilinear
 tile per camera with the same one-decode->split->v360 graph the single-pass extractor
 used -- only the input is the frame sequence, not the video. Every camera writes the same
@@ -68,7 +68,7 @@ def _project_masks(ffmpeg: FFmpegInfo, rig: Rig, cameras, sizes, directories,
         camera_mask = geometric.render_camera_mask(
             ffmpeg, equirect, camera, width, height, work / f"{camera.name}.png")
         total += link_sidecars(camera_mask, image_dir,
-                               output_root / "masks" / clip / camera.name)
+                               dataset.masks_dir(output_root, clip) / camera.name)
     return total
 
 
@@ -159,7 +159,7 @@ def _project_mask_sequence(ffmpeg, mask_sequence_dir: Path, rig: Rig, cameras, s
             "-i", str(mask_sequence_dir / mask_pattern), "-filter_complex", graph]
     directories = []
     for label, camera in zip(labels, cameras):
-        mask_dir = output_root / "masks" / clip / camera.name
+        mask_dir = dataset.masks_dir(output_root, clip) / camera.name
         mask_dir.mkdir(parents=True, exist_ok=True)
         directories.append(mask_dir)
         argv += ["-map", f"[{label}]", "-start_number", str(start_number),
@@ -175,7 +175,7 @@ def generate_cameras(ffmpeg: FFmpegInfo, frames_directory: str | Path, rig: Rig,
                      sky_cone_angle: float | None = None, detect=None,
                      on_progress=None, on_mask_progress=None, should_cancel=None,
                      overwrite: bool = True) -> CamerasResult:
-    """Project every extracted frame through the rig into images/<clip>/<camera>/.
+    """Project every extracted frame through the rig into images/<camera>/.
 
     Also writes the matching per-camera mask sidecars so the result is training-ready:
     per-frame detection on the panorama frames when `detect` has classes and ML is
@@ -205,7 +205,7 @@ def generate_cameras(ffmpeg: FFmpegInfo, frames_directory: str | Path, rig: Rig,
     root = Path(output_root)
     directories: list[Path] = []
     for label, camera in zip(labels, cameras):
-        camera_dir = root / "images" / clip / camera.name
+        camera_dir = dataset.images_dir(root, clip) / camera.name
         camera_dir.mkdir(parents=True, exist_ok=True)
         directories.append(camera_dir)
         argv += ["-map", f"[{label}]", "-start_number", str(start_number),

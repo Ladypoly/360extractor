@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from . import sharp
+from . import dataset, sharp
 from .ffmpeg import FFmpegInfo, MediaInfo
 from .rig import Camera, Rig, native_size, output_size
 
@@ -376,7 +376,7 @@ def plan_extraction(
             continue
         # `brush` puts everything under images/, which is what both Brush and COLMAP
         # expect, and lets masks/ mirror the same subpaths exactly.
-        directory = root / "images" / clip / camera.name if layout == "brush" \
+        directory = dataset.images_dir(root, clip) / camera.name if layout == "brush" \
             else root / clip / camera.name
         # COLMAP groups images into frames by matching filenames *across* camera
         # folders, so in the brush layout every camera's frame N must be called the
@@ -385,8 +385,7 @@ def plan_extraction(
         pattern = f"%0{digits}d.{extension}" if layout == "brush" \
             else f"{clip}_{camera.name}_%0{digits}d.{extension}"
         width, height = camera_size(camera, rig, media)
-        mask_directory = (root / "masks" / clip / camera.name) if layout == "brush" \
-            else (root / "masks" / clip / camera.name)
+        mask_directory = dataset.masks_dir(root, clip) / camera.name
         job = CameraJob(camera=camera, directory=directory, pattern=pattern,
                         width=width, height=height, mask_directory=mask_directory,
                         marker_path=root / ".threesixty" / "markers"

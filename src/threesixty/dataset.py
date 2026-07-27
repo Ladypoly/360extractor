@@ -39,6 +39,43 @@ GEOMETRY_DIRNAME = ".geometry"
 MASK_DIRNAME = ".mask"
 
 
+# -- where things live ------------------------------------------------------
+#
+# A project folder is already named after its clip, so the dataset used to read
+# `Q360_.../images/Q360_.../c01/` -- the clip spelled twice for no reason. The clip level
+# is gone; a project holds one clip and its own name says which.
+#
+# Projects written before that still have it, and re-extracting an 8K source to move some
+# folders is not a reasonable thing to ask, so every lookup falls back to the old shape
+# when it is what is on disk. Writing is always the new shape.
+
+
+def _tree(root: str | Path, name: str, clip: str | None) -> Path:
+    """`<root>/<name>`, or the old `<root>/<name>/<clip>` when that is what exists.
+
+    A project that already has the clip level keeps it -- reads *and* writes -- so it
+    stays internally consistent rather than ending up half in each shape.
+    """
+    current = Path(root) / name
+    legacy = current / clip if clip else None
+    return legacy if legacy is not None and legacy.is_dir() else current
+
+
+def frames_dir(root: str | Path, clip: str | None = None) -> Path:
+    """Where the extracted equirect frames live."""
+    return _tree(root, "frames", clip)
+
+
+def images_dir(root: str | Path, clip: str | None = None) -> Path:
+    """The parent of the per-camera image folders."""
+    return _tree(root, "images", clip)
+
+
+def masks_dir(root: str | Path, clip: str | None = None) -> Path:
+    """The parent of the per-camera mask folders."""
+    return _tree(root, "masks", clip)
+
+
 @dataclass
 class ExportResult:
     views: list[Path] = field(default_factory=list)
@@ -82,8 +119,8 @@ def export_dataset(root: str | Path, clip: str, camera_names, on_progress=None
     result = ExportResult()
 
     for index, name in enumerate(names):
-        images = root / "images" / clip / name
-        masks = root / "masks" / clip / name
+        images = images_dir(root, clip) / name
+        masks = masks_dir(root, clip) / name
         geometry_dir = _reset(view_dir(root, index) / GEOMETRY_DIRNAME)
         mask_dir = _reset(view_dir(root, index) / MASK_DIRNAME)
         if not images.is_dir():
@@ -117,12 +154,12 @@ def remove_frames(root: str | Path, clip: str, stems) -> RemovalResult:
     removed = RemovalResult()
 
     for stem in wanted:
-        for path in _glob(root / "frames" / clip, f"{stem}.*"):
+        for path in _glob(frames_dir(root, clip), f"{stem}.*"):
             removed.frames += _unlink(path)
-        for directory in _subdirs(root / "images" / clip):
+        for directory in _subdirs(images_dir(root, clip)):
             for path in _glob(directory, f"{stem}.*"):
                 removed.images += _unlink(path)
-        for directory in _subdirs(root / "masks" / clip):
+        for directory in _subdirs(masks_dir(root, clip)):
             for path in _glob(directory, f"{stem}.*"):
                 removed.masks += _unlink(path)
         _unlink(root / ".threesixty" / "masks" / "equirect_masks" / f"{stem}.png")

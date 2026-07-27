@@ -313,7 +313,7 @@ class TestTwoStageCapture:
         snap = self._wait(base, "start")
         assert snap["state"] == "done", snap
         assert snap["result"]["frames"] >= 1
-        assert (tmp_path / "proj" / "frames" / "drive").is_dir()
+        assert any((tmp_path / "proj" / "frames").glob("*.jpg"))
 
         rig = {"cameras": [{"name": f"c{i}", "yaw": i * 180 - 90, "pitch": 0,
                             "h_fov": 90, "v_fov": 90} for i in range(2)],
@@ -327,7 +327,7 @@ class TestTwoStageCapture:
         reopened = Project.load(tmp_path / "proj")
         assert reopened.status("extract") == "done"
         for i in range(2):
-            assert (tmp_path / "proj" / "images" / "drive" / f"c{i}").is_dir()
+            assert (tmp_path / "proj" / "images" / f"c{i}").is_dir()
 
     def test_frames_list_and_serving(self, make_ui, tmp_path, equirect_clip):
         source = tmp_path / "drive.mp4"

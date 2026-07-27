@@ -152,7 +152,7 @@ what stops panoramic tile sets drifting.
 
 Two details that are easy to get wrong and are pinned by tests: COLMAP groups images into
 frames by **matching filenames across camera folders**, which is why files are named
-`00001.jpg` inside `<clip>/<camera>/` rather than carrying the camera name; and the rig must be
+`00001.jpg` inside `images/<camera>/` rather than carrying the camera name; and the rig must be
 configured *before* matching, because sequential matching pairs images by frame.
 
 Verified against COLMAP 4.1.1 itself, not just against our reading of the format:
@@ -447,10 +447,11 @@ Pass `--width`/`--height` to override with a fixed size for every camera.
 ## Output
 
 ```
-dataset/
-  images/clip/fwd/   clip_fwd_00001.jpg  clip_fwd_00002.jpg  ...
-  images/clip/left/  clip_left_00001.jpg ...
-  masks/ clip/fwd/   clip_fwd_00001.png  ...
+dataset/            <- the project folder, named after the clip
+  frames/            00001.jpg  00002.jpg  ...   (the extracted panoramas)
+  images/fwd/        00001.jpg  00002.jpg  ...
+  images/left/       00001.jpg  ...
+  masks/fwd/         00001.png  ...
 ```
 
 This is the layout Brush and COLMAP both read. Brush pairs an image with its mask by mirroring
