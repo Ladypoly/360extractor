@@ -279,3 +279,26 @@ class TestLaterStages:
         project.mark_done("train", steps=30000)
         project.save()
         assert Project.load(tmp_path / "p").status("train") == "done"
+
+
+class TestSourcePaths:
+    def test_a_relative_source_is_stored_absolute(self, tmp_path, monkeypatch):
+        """`--source drive.mp4` run beside the video used to be read back as
+        <project>/drive.mp4 and reported missing."""
+        video = tmp_path / "drive.mp4"
+        video.write_bytes(b"x")
+        monkeypatch.chdir(tmp_path)
+
+        project = Project.create(tmp_path / "dataset", sources=["drive.mp4"])
+        assert project.resolved_sources() == [video]
+        assert project.missing_sources() == []
+
+    def test_a_source_inside_the_project_stays_relative(self, tmp_path):
+        """A dataset that carries its own footage should still be movable."""
+        root = tmp_path / "dataset"
+        root.mkdir()
+        (root / "clip.mp4").write_bytes(b"x")
+
+        project = Project.create(root, sources=[str(root / "clip.mp4")])
+        assert project.sources == ["clip.mp4"]
+        assert project.resolved_sources() == [root / "clip.mp4"]

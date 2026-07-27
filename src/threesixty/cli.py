@@ -35,7 +35,7 @@ from .plan import (
     plan_extraction,
     safe_stem,
 )
-from .project import STAGES, Project, ProjectError
+from .project import STAGES, FrameSettings, Project, ProjectError
 from .rig import PRESETS, Output, Rig, RigError, cube, dome, handheld, ring, car_forward
 
 
@@ -401,8 +401,21 @@ def cmd_project_new(args: argparse.Namespace) -> int:
     rig = load_rig(args.rig) if args.rig else None
     project = Project.create(args.directory, sources=args.source, rig=rig,
                              name=args.name, overwrite=args.force)
+
+    # Frame selection and masking are project settings, so `run` picks them up later.
+    if any(getattr(args, name, None) for name in ("fps", "sharp", "every", "all_frames"))             or args.start is not None or args.end is not None:
+        selection = _selection_from_args(args)
+        project.frames = FrameSettings(mode=selection.mode, value=selection.value,
+                                       start=selection.start, end=selection.end)
+    if args.classes is not None:
+        project.detect.classes = list(args.classes)
+    project.save()
+
     print(f"created {project.file}")
     print(f"  rig     {project.rig.name} ({len(project.rig.enabled_cameras)} cameras)")
+    print(f"  frames  {project.frames.mode} {project.frames.value:g}"
+          + (" seconds" if project.frames.mode == "sharp" else ""))
+    print(f"  masking {', '.join(project.detect.classes) or 'off'}")
     print(f"  sources {len(project.sources) or 'none yet'}")
     return 0
 
@@ -494,7 +507,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         project.detect.backend, classes=project.detect.classes,
         confidence=project.detect.confidence, dilate=project.detect.dilate,
         device=project.detect.device)
-    print(f"mask: {backend.name}, looking for {', '.join(project.detect.classes)}")
+    # The project's choice, not the wrapper's name: `sam-world` reports itself as
+    # "sam2.1" because SAM is the outer layer, which reads as the wrong detector.
+    print(f"mask: {project.detect.backend}, "
+          f"looking for {', '.join(project.detect.classes)}")
     report = dynamic.run(ffmpeg, project.root, project.rig, backend,
                          fuse=project.detect.fuse,
                          on_progress=lambda note: print(f"  {note}", flush=True))
@@ -787,6 +803,27 @@ def build_parser() -> argparse.ArgumentParser:
     project_new.add_argument("--name")
     project_new.add_argument("--force", action="store_true",
                              help="replace an existing project.json")
+
+    # The same frame selection `extract` takes. Without these a project could only ever
+    # be created at the defaults, and `run` reads its settings from the project -- so
+    # there was no way to say how to sample a clip from the command line at all.
+    new_frames = project_new.add_mutually_exclusive_group()
+    new_frames.add_argument("--fps", type=float, metavar="N",
+                            help="sample this many frames per second")
+    new_frames.add_argument("--sharp", type=float, metavar="SECONDS",
+                            help="keep the sharpest frame of every SECONDS of source "
+                                 "(the default, at 0.5)")
+    new_frames.add_argument("--every", type=int, metavar="N",
+                            help="take every Nth source frame")
+    new_frames.add_argument("--all-frames", action="store_true",
+                            help="extract every source frame")
+    project_new.add_argument("--start", type=float, metavar="SEC",
+                             help="skip to this timestamp")
+    project_new.add_argument("--end", type=float, metavar="SEC",
+                             help="stop at this timestamp")
+    project_new.add_argument("--classes", nargs="*", metavar="CLASS",
+                             help="what masking removes (default: sky and the usual "
+                                  "traffic). An empty list disables masking.")
     project_new.set_defaults(func=cmd_project_new)
 
     project_show = project_sub.add_parser("show", help="print settings and stage status")
@@ -859,9 +896,12 @@ def build_parser() -> argparse.ArgumentParser:
         "mask", help="mask moving occluders (people, cars) in an extracted dataset")
     mask.add_argument("dataset", help="the folder `extract` wrote, containing images/")
     mask.add_argument("--rig", required=True, help="the rig used for the extraction")
-    mask.add_argument("--backend", choices=["yolo", "sam2.1"], default="sam2.1",
-                      help="yolo finds objects by class; sam2.1 uses YOLO for prompts "
-                           "and refines the outlines (default)")
+    mask.add_argument("--backend",
+                      choices=["yolo", "sam2.1", "yolo-world", "sam-world"],
+                      default="sam-world",
+                      help="the -world variants take any word, including sky, which "
+                           "the COCO ones cannot; the sam- ones refine boxes into real "
+                           "outlines (default sam-world)")
     mask.add_argument("--classes", default=",".join(ml_defaults()),
                       help="comma-separated COCO class names to mask")
     mask.add_argument("--confidence", type=float, default=0.25)

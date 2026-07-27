@@ -139,12 +139,21 @@ class Project:
         return self.root / "assets"
 
     def relative(self, path: str | os.PathLike[str]) -> str:
-        """Store paths inside the project relative, so the folder stays portable."""
+        """Store paths inside the project relative, so the folder stays portable.
+
+        Anything outside it is stored **absolute**, resolved against the current working
+        directory. Keeping the caller's relative string would be silently wrong: it is
+        read back relative to the *project root*, so `--source drive.mp4` run beside the
+        video would look for it inside the dataset folder and report it missing.
+        """
         target = Path(path)
         try:
             return target.resolve().relative_to(self.root.resolve()).as_posix()
         except (ValueError, OSError):
-            return str(target)
+            try:
+                return str(target.resolve())
+            except OSError:
+                return str(target)
 
     def absolute(self, stored: str) -> Path:
         """Resolve a stored path back, relative to the project root."""
