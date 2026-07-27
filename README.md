@@ -449,22 +449,26 @@ Pass `--width`/`--height` to override with a fixed size for every camera.
 ```
 dataset/                      <- the project folder, named after the clip
   frames/                      00001.jpg  00002.jpg  ...   (the panoramas)
-  images/fwd/.geometry/        00001.jpg  00002.jpg  ...   (the tiles)
-  images/fwd/.mask/            00001.png  00002.png  ...
-  images/left/.geometry/       ...
-  masks/fwd/.geometry/         00001.png  00001.jpg.png    (hard links)
+  images/fwd/images/        00001.jpg  00002.jpg  ...   (the tiles)
+  images/fwd/masks/            00001.png  00002.png  ...
+  images/left/images/       ...
+  masks/fwd/images/         00001.png  00001.jpg.png    (hard links)
 ```
 
 A camera owns one folder holding its images and the masks that go with them.
 
 `masks/` is a **mirror**, built out of hard links, and it exists because neither trainer can be
-pointed anywhere else. Brush pairs `images/<sub>/x.jpg` with `masks/<sub>/x.png`; COLMAP's
-`--ImageReader.mask_path` wants `<sub>/x.jpg.png` — the doubled extension is its documented
-convention, and a mask it cannot find is simply not applied, silently. Both names are written.
+pointed anywhere else. Brush pairs `images/<sub>/x.jpg` with `masks/<sub>/x.png`; COLMAP accepts
+either that or `<sub>/x.jpg.png`, and both names are written so neither can miss one.
+
+COLMAP's feature extractor scans `--image_path` **recursively**, so left alone it reads each
+camera's `masks/` folder as more photographs — measured, that doubled the camera count and fed
+all-white images into the reconstruction. `image_list.txt` is written beside `rig_config.json`
+and passed as `--image_list_path`; it is not optional.
 
 Filenames stay identical across camera folders, and that is load-bearing: COLMAP's
 `rig_configurator` groups images into *frames* by what is left of the path once a camera's
-`image_prefix` is stripped, so the prefixes are `fwd/.geometry/` and the frame is `00001.jpg`.
+`image_prefix` is stripped, so the prefixes are `fwd/images/` and the frame is `00001.jpg`.
 Put the camera in the filename and every image becomes its own frame, dissolving the rig
 constraint that keeps a panoramic tile set from drifting (COLMAP 4.0 has no `image_suffix` to
 strip it back off). See `dataset.py`.

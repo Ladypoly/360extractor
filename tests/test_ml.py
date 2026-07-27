@@ -47,9 +47,9 @@ class StubBackend:
 
     @staticmethod
     def _camera(image):
-        """The camera an image belongs to: its folder, or the one above `.geometry`."""
+        """The camera an image belongs to: its folder, or the one above `images/`."""
         folder = Path(image).parent
-        return folder.parent.name if folder.name.startswith(".") else folder.name
+        return folder.parent.name if folder.name in {"images", "masks"} else folder.name
 
     def detect(self, images):
         results = []

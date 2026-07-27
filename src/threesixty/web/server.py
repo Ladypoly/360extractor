@@ -592,7 +592,7 @@ class Handler(BaseHTTPRequestHandler):
                 if image.suffix.lower() not in {".jpg", ".jpeg", ".png"}:
                     continue
                 offset = start + (frame_number(image) - 1) / max(per_second, 1e-6)
-                key = image.relative_to(images_root).as_posix()
+                key = image.relative_to(project.root / "images").as_posix()
                 entries[key] = gps.interpolate(fixes, fixes[0].time + offset)
         return gps.write_geo_registration(entries, project.root / "geo_registration.txt")
 

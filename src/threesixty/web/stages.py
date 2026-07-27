@@ -78,10 +78,16 @@ def readiness(project: Project | None) -> dict[str, dict]:
         states["start"] = {"ready": True, "reason": ""}   # the entry point is always open
         return states
 
-    images_root = project.root / "images"
-    has_images = images_root.exists() and any(
-        next(images_root.rglob(pattern), None) is not None
-        for pattern in ("*.jpg", "*.jpeg", "*.png"))
+    # Only a camera's image folder counts. Masks live under `images/` too now, and a
+    # project holding nothing but masks is not ready to reconstruct.
+    from .. import dataset
+
+    sources = project.resolved_sources()
+    clip = safe_stem(sources[0].stem) if sources else None
+    has_images = any(
+        next(dataset.geometry_dir(project.root, clip, camera.name).glob("*.*"), None)
+        is not None
+        for camera in project.rig.normalized_cameras())
     sparse = sparse_model_dir(project)
     splats = trained_splats(project)
 
@@ -124,6 +130,12 @@ def reconstruction_steps(project: Project, colmap: Path, clip: str,
                "--image_path", str(root / "images"),
                "--database_path", str(database),
                "--ImageReader.single_camera_per_folder", "1"]
+    # Each camera keeps its masks beside its images, and COLMAP's scan does not know
+    # the difference -- without an explicit list it reads them as photographs and
+    # invents a camera per mask folder. Measured against COLMAP 4.0.2.
+    listing = root / "image_list.txt"
+    if listing.exists():
+        extract += ["--image_list_path", str(listing)]
     if masks.exists():
         extract += ["--ImageReader.mask_path", str(masks)]
 

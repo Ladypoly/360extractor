@@ -7,27 +7,26 @@ with them, side by side, so a camera is a self-contained thing you can look at:
       frames/                    00001.jpg ...          the extracted panoramas
       images/
         c00/
-          .geometry/             00001.jpg ...          the tiles
-          .mask/                 00001.png ...          white keeps, black is ignored
+          images/                00001.jpg ...          the tiles
+          masks/                 00001.png ...          white keeps, black is ignored
         c01/
           ...
       masks/                                            hard links, for the trainers
-        c00/.geometry/           00001.png  00001.jpg.png
+        c00/images/              00001.png  00001.jpg.png
 
 **Filenames stay identical across camera folders.** COLMAP's `rig_configurator` groups
 images into *frames* by whatever is left of the path once a camera's `image_prefix` is
-stripped, so `c00/.geometry/` and `c01/.geometry/` are the prefixes and `00001.jpg` is
+stripped, so `c00/images/` and `c01/images/` are the prefixes and `00001.jpg` is
 the frame. Putting the camera in the filename would give every image its own frame and
 dissolve the rig constraint that is the entire reason a panoramic tile set does not
 drift. (COLMAP 4.0 has no `image_suffix` to strip it back off; only `image_prefix`.)
 
 **`masks/` is a mirror, not a copy.** Both trainers insist on finding masks in a root
 that mirrors the image tree, and neither can be pointed elsewhere: Brush pairs
-`images/<sub>/x.jpg` with `masks/<sub>/x.png`, and COLMAP's `--ImageReader.mask_path`
-wants `<sub>/x.jpg.png` -- note the doubled extension, which is COLMAP's documented
-convention and easy to get silently wrong, because a mask it cannot find is simply not
-applied. Both names are written, as hard links, so the mirror costs directory entries
-rather than a second copy of the dataset.
+`images/<sub>/x.jpg` with `masks/<sub>/x.png`, and COLMAP wants the same thing under
+`--ImageReader.mask_path`. Measured against COLMAP 4.0.2, it accepts either `x.png` or
+`x.jpg.png`; both are written as hard links, so the mirror costs directory entries
+rather than a second copy of the dataset, and neither tool can miss it.
 """
 
 from __future__ import annotations
@@ -37,10 +36,15 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
-#: The two folders inside a camera. Dot-prefixed, which keeps them out of naive image
-#: scans and is what the tools reading this layout expect.
-GEOMETRY_DIRNAME = ".geometry"
-MASK_DIRNAME = ".mask"
+#: The two folders inside a camera.
+#:
+#: They are NOT hidden, and that matters: COLMAP's feature extractor scans `image_path`
+#: recursively and will happily read `masks/00001.png` as another image -- measured, it
+#: produced twice the cameras and a set of all-white "photographs". Dot-prefixing them
+#: does not help; COLMAP does not skip dotted folders either. The fix is to hand COLMAP
+#: an explicit image list, which `colmap/export.py` writes.
+GEOMETRY_DIRNAME = "images"
+MASK_DIRNAME = "masks"
 
 
 # -- where things live ------------------------------------------------------
@@ -170,7 +174,7 @@ def fill_missing_masks(root: str | Path, clip: str, camera_names) -> list[tuple[
 
 
 def mirror_masks(root: str | Path, clip: str, camera_names) -> MirrorResult:
-    """Rebuild `masks/` from the per-camera `.mask` folders, for COLMAP and Brush.
+    """Rebuild `masks/` from the per-camera mask folders, for COLMAP and Brush.
 
     Rebuilt rather than merged: a re-run with fewer frames must not leave the previous
     run's masks behind, silently masking images that no longer exist.
@@ -220,6 +224,28 @@ def remove_frames(root: str | Path, clip: str, stems) -> RemovalResult:
                 removed.mirrored += _unlink(path)
 
     return removed
+
+
+def image_list(root: str | Path, clip: str, camera_names) -> list[str]:
+    """Every real image, as the path COLMAP records it: relative to `images/`.
+
+    COLMAP's feature extractor scans `image_path` recursively, so left to itself it reads
+    each camera's `masks/` folder as more photographs -- measured, that doubled the camera
+    count and fed all-white images into the reconstruction. Handing it this list instead
+    is the fix, and it is exact rather than a filter that has to guess.
+    """
+    root = Path(root)
+    # Relative to `<root>/images`, because that is what COLMAP is given as --image_path
+    # and what it records in the model. On a dataset that still repeats the clip, the
+    # clip is part of the name.
+    top = root / "images"
+    names: list[str] = []
+    for camera in camera_names:
+        directory = geometry_dir(root, clip, camera)
+        for image in sorted(directory.glob("*.*")) if directory.is_dir() else []:
+            if image.is_file() and not image.name.startswith("."):
+                names.append(image.relative_to(top).as_posix())
+    return names
 
 
 def blank_masks(root: str | Path, clip: str) -> list[str]:

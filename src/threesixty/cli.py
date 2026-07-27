@@ -297,7 +297,7 @@ def _write_geo_registration(project, clip: str, gpx_path: str, ffmpeg):
                 continue
             number = dynamic_frame_number(image)
             offset = start + (number - 1) / max(per_second, 1e-6)
-            name = image.relative_to(images_root).as_posix()
+            name = image.relative_to(project.root / "images").as_posix()
             entries[name] = gps.interpolate(fixes, fixes[0].time + offset)
 
     return gps.write_geo_registration(entries, project.root / "geo_registration.txt")

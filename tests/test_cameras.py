@@ -26,7 +26,7 @@ def test_generates_a_tile_folder_per_camera(ffmpeg, extracted):
     assert result.images_written > 0
     assert not result.cancelled
     for camera in rig.normalized_cameras():
-        camera_dir = root / "images" / camera.name / ".geometry"
+        camera_dir = root / "images" / camera.name / "images"
         assert camera_dir.is_dir() and any(camera_dir.glob("*.jpg"))
 
 
@@ -36,7 +36,7 @@ def test_frame_numbers_match_across_cameras(ffmpeg, extracted):
     rig = ring(3)
     generate_cameras(ffmpeg, frames, rig, root)
 
-    listings = [sorted(p.name for p in (root / "images" / c.name / ".geometry").glob("*.jpg"))
+    listings = [sorted(p.name for p in (root / "images" / c.name / "images").glob("*.jpg"))
                 for c in rig.normalized_cameras()]
     assert all(names == listings[0] for names in listings)
     assert len(listings[0]) >= 1
@@ -50,8 +50,8 @@ def test_sky_cone_writes_mask_sidecars(ffmpeg, extracted):
 
     assert result.masks_written > 0
     for camera in rig.normalized_cameras():
-        image_dir = root / "images" / camera.name / ".geometry"
-        mask_dir = root / "images" / camera.name / ".mask"
+        image_dir = root / "images" / camera.name / "images"
+        mask_dir = root / "images" / camera.name / "masks"
         images = sorted(p.stem for p in image_dir.glob("*.jpg"))
         masks = sorted(p.stem for p in mask_dir.glob("*.png"))
         assert masks == images and images       # a mask per image, same stems
@@ -65,9 +65,9 @@ def test_every_image_gets_a_mask_even_with_nothing_to_mask(ffmpeg, extracted):
     assert result.blank_masks > 0
     for camera in ring(2).normalized_cameras():
         images = sorted(p.stem for p in
-                        (root / "images" / camera.name / ".geometry").glob("*.jpg"))
+                        (root / "images" / camera.name / "images").glob("*.jpg"))
         masks = sorted(p.stem for p in
-                       (root / "images" / camera.name / ".mask").glob("*.png"))
+                       (root / "images" / camera.name / "masks").glob("*.png"))
         assert masks == images and images
 
 
@@ -79,8 +79,8 @@ def test_masks_are_mirrored_where_the_trainers_look(ffmpeg, extracted):
     generate_cameras(ffmpeg, frames, rig, root, sky_cone_angle=30.0)
 
     for camera in rig.normalized_cameras():
-        images = root / "images" / camera.name / ".geometry"
-        mirror = root / "masks" / camera.name / ".geometry"
+        images = root / "images" / camera.name / "images"
+        mirror = root / "masks" / camera.name / "images"
         for image in images.glob("*.jpg"):
             assert (mirror / f"{image.stem}.png").exists()          # Brush
             assert (mirror / f"{image.stem}.jpg.png").exists()      # COLMAP

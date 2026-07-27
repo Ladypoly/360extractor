@@ -358,3 +358,27 @@ class TestBatches:
         assert any(line.startswith("clip/c00/") for line in lines)
         assert any(line.startswith("clip/c01/") for line in lines)
         assert lines[0].endswith(".jpg")
+
+
+class TestImageList:
+    def test_export_writes_a_list_that_excludes_the_masks(self, tmp_path):
+        """Without it COLMAP reads each camera's masks/ folder as photographs."""
+        from threesixty.rig import ring
+
+        for camera in ("c00", "c01"):
+            (tmp_path / "images" / camera / "images").mkdir(parents=True)
+            (tmp_path / "images" / camera / "masks").mkdir(parents=True)
+            (tmp_path / "images" / camera / "images" / "00001.jpg").write_bytes(b"x")
+            (tmp_path / "images" / camera / "masks" / "00001.png").write_bytes(b"x")
+
+        paths = export.export(tmp_path, ring(2), "clip", 4096)
+        listed = paths.image_list.read_text(encoding="utf-8").split()
+
+        assert listed == ["c00/images/00001.jpg", "c01/images/00001.jpg"]
+
+    def test_the_command_list_passes_it(self, tmp_path):
+        text = export.build_commands(tmp_path, has_masks=True, geo_registration=False)
+        assert "--image_list_path" in text
+        # A comment inside a line continuation would break the script.
+        for line in text.splitlines():
+            assert not (line.lstrip().startswith("#") and line.rstrip().endswith("\\"))

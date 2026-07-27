@@ -88,6 +88,7 @@ class ExportPaths:
     cameras: Path
     commands: Path
     geo_registration: Path | None = None
+    image_list: Path | None = None
 
 
 def build_rig_config(rig: Rig, clip: str, source_width: int,
@@ -101,7 +102,7 @@ def build_rig_config(rig: Rig, clip: str, source_width: int,
     point, so there is no baseline to model.
 
     `prefix` and `suffix` bracket the camera name to give the path COLMAP will see below
-    `images/`. Currently that is `<camera>/.geometry/`; older datasets have `<camera>/`,
+    `images/`. Currently that is `<camera>/images/`; older datasets have `<camera>/`,
     and older ones again repeat the clip above it. `image_prefix` reads which from disk.
     """
     cameras = rig.normalized_cameras()
@@ -161,9 +162,12 @@ def build_commands(root: Path, has_masks: bool, geo_registration: bool,
         "",
         f"COLMAP={colmap!r}".replace("'", '"'),
         "",
+        "# The image list is not optional: without it COLMAP scans each camera's",
+        "# masks/ folder as more photographs and invents cameras for them.",
         "$COLMAP feature_extractor \\",
         f"  --image_path {root_text}/images \\",
         f"  --database_path {root_text}/database.db \\",
+        f"  --image_list_path {root_text}/image_list.txt \\",
         "  --ImageReader.single_camera_per_folder 1 \\",
     ]
     if has_masks:
@@ -213,7 +217,7 @@ def image_prefix(root: Path, clip: str) -> tuple[str, str]:
     """What sits between `images/` and a camera's filenames on *this* dataset.
 
     Answered from disk rather than assumed, because three shapes exist: a camera's images
-    live in `<camera>/.geometry/` now, sat directly in `<camera>/` before that, and had
+    live in `<camera>/images/` now, sat directly in `<camera>/` before that, and had
     the clip repeated above them before that. The prefix has to name whatever is there,
     and a wrong one means `rig_configurator` matches no images at all.
     """
@@ -246,6 +250,13 @@ def export(root: str | Path, rig: Rig, clip: str, source_width: int,
     cameras_path = write_cameras_text(build_cameras(rig, source_width),
                                       directory / "colmap_cameras.txt")
 
+    from ..dataset import image_list as dataset_image_list
+
+    listing = directory / "image_list.txt"
+    names = dataset_image_list(directory, clip,
+                               [c.name for c in rig.normalized_cameras()])
+    listing.write_text("\n".join(names) + ("\n" if names else ""), encoding="utf-8")
+
     commands = directory / "run_colmap.sh"
     commands.write_text(
         build_commands(directory, has_masks, geo_registration, colmap=colmap),
@@ -253,4 +264,5 @@ def export(root: str | Path, rig: Rig, clip: str, source_width: int,
 
     return ExportPaths(rig_config=rig_config, cameras=cameras_path, commands=commands,
                        geo_registration=(directory / "geo_registration.txt")
-                       if geo_registration else None)
+                       if geo_registration else None,
+                       image_list=listing)

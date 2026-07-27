@@ -199,8 +199,8 @@ class TestApplyModes:
                                ffmpeg=ffmpeg, mask_mode="sidecar")
         run_extraction(plan, ffmpeg)
         for job in plan.passes[0].jobs:
-            assert job.directory.name == ".geometry"
-            assert job.mask_directory.name == ".mask"
+            assert job.directory.name == "images"
+            assert job.mask_directory.name == "masks"
             assert job.mask_directory.parent == job.directory.parent
 
     def test_masks_are_mirrored_for_the_trainers(self, ffmpeg, equirect_clip, tmp_path):
