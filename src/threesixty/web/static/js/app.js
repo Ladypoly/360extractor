@@ -172,6 +172,10 @@ export function applyProject(project, { keepMedia = false, keepStage = false } =
 
 // ── system status ──────────────────────────────────────────────────────
 
+//: The tool names the server will store a path for, keyed by display name.
+const TOOL_KEYS = { FFmpeg: "ffmpeg", COLMAP: "colmap", Brush: "brush",
+                    SuperSplat: "supersplat" };
+
 async function showSystem() {
   const dialog = document.getElementById("system-dialog");
   const body = dialog.querySelector(".dialog__body");
@@ -179,14 +183,52 @@ async function showSystem() {
   dialog.showModal();
 
   try {
-    const { tools } = await api.get("/api/system");
-    body.replaceChildren(...tools.map((tool) => el("div", { class: "tool-row" },
-      el("span", { class: "tool-row__name" }, tool.name),
-      StatusBadge(tool.found ? "done" : "error", tool.found ? "detected" : "missing"),
-      el("span", { class: "tool-row__path" },
-        tool.found ? `${tool.version || ""} ${tool.path}`.trim() : tool.detail))));
+    render(await api.get("/api/system"));
   } catch (error) {
     body.replaceChildren(el("div", { class: "hint hint--error" }, error.message));
+  }
+
+  function render({ tools, configured = {} }) {
+    const fields = {};
+    const rows = tools.map((tool) => {
+      const key = TOOL_KEYS[tool.name];
+      // Not every listed tool is one we know how to store a path for.
+      const field = key
+        ? el("input", { type: "text", value: configured[key] || "",
+                        placeholder: tool.found ? tool.path : "path to the binary" })
+        : null;
+      if (field) fields[key] = field;
+      return el("div", { class: "tool-row tool-row--settable" },
+        el("span", { class: "tool-row__name" }, tool.name),
+        StatusBadge(tool.found ? "done" : "error", tool.found ? "detected" : "missing"),
+        el("span", { class: "tool-row__path" },
+          tool.found ? `${tool.version || ""} ${tool.path}`.trim() : tool.detail),
+        field || el("span", {}));
+    });
+
+    const status = el("span", { class: "hint", style: "flex:1" });
+    rows.push(el("div", { class: "field", style: "margin:12px 0 0" },
+      status,
+      el("button", {
+        class: "btn btn--primary", type: "button", style: "flex:0 0 auto",
+        onclick: async () => {
+          status.textContent = "Saving…";
+          const values = {};
+          for (const [key, field] of Object.entries(fields)) values[key] = field.value;
+          try {
+            // The answer is a fresh survey, so a path that holds no binary says so here
+            // rather than at the start of a reconstruction twenty minutes later.
+            const result = await api.post("/api/system/tools", { tools: values });
+            render(result);
+            flash("Tool paths saved.", { level: "info" });
+          } catch (error) { status.textContent = error.message; }
+        },
+      }, "Save paths")));
+
+    rows.push(el("p", { class: "hint" },
+      "Leave a field empty to go back to searching PATH and the usual install "
+      + "locations. THREESIXTY_FFMPEG and friends still win over anything set here."));
+    body.replaceChildren(...rows);
   }
 }
 

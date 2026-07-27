@@ -234,3 +234,39 @@ class TestExtraction:
         })
         assert status == 400
         assert "positive" in body["error"]
+
+
+class TestToolPaths:
+    """The error messages said "set its path in System status" while System status was
+    a read-only list. Now it is settable, and the setting survives a restart."""
+
+    def test_the_survey_reports_what_is_configured(self, ui, tmp_path):
+        from threesixty import toolpaths
+
+        toolpaths.save("brush", str(tmp_path / "brush.exe"))
+        status, raw, _ = get(ui, "/api/system")
+        assert status == 200
+        assert json.loads(raw)["configured"]["brush"] == str(tmp_path / "brush.exe")
+
+    def test_saving_a_path_persists_and_reports_back(self, ui, tmp_path):
+        from threesixty import toolpaths
+
+        status, body = post(ui, "/api/system/tools",
+                            {"tools": {"colmap": str(tmp_path / "colmap.exe")}})
+        assert status == 200
+        assert body["configured"]["colmap"] == str(tmp_path / "colmap.exe")
+        # Written to the user-level store, so a restart still knows.
+        assert toolpaths.stored()["colmap"] == str(tmp_path / "colmap.exe")
+        # ...and answered with a fresh survey, so a bad path shows immediately.
+        assert [tool["name"] for tool in body["tools"]]
+
+    def test_an_empty_path_goes_back_to_searching(self, ui, tmp_path):
+        from threesixty import toolpaths
+
+        toolpaths.save("brush", str(tmp_path / "brush.exe"))
+        _, body = post(ui, "/api/system/tools", {"tools": {"brush": ""}})
+        assert "brush" not in body["configured"]
+
+    def test_unknown_tools_are_ignored(self, ui):
+        _, body = post(ui, "/api/system/tools", {"tools": {"nonsense": "/x"}})
+        assert "nonsense" not in body["configured"]

@@ -15,16 +15,10 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from .. import toolpaths
+
 #: Rigs and frames were introduced in 3.12; earlier builds ignore rig_config.json.
 MIN_VERSION = (3, 12)
-
-#: Places Windows installers and archives tend to land.
-COMMON_LOCATIONS = (
-    r"C:\Tools\colmap\colmap-x64-windows-cuda\bin",
-    r"C:\Tools\colmap\colmap-x64-windows-nocuda\bin",
-    r"C:\Program Files\COLMAP\bin",
-    r"C:\COLMAP\bin",
-)
 
 _VERSION = re.compile(r"COLMAP\s+(\d+)\.(\d+)(?:\.(\d+))?")
 
@@ -79,8 +73,9 @@ def _candidates(explicit: str | os.PathLike[str] | None) -> list[tuple[Path, str
 
     add(explicit, "--colmap")
     add(os.environ.get("THREESIXTY_COLMAP"), "THREESIXTY_COLMAP")
+    add(toolpaths.get("colmap"), "configured")
     add(shutil.which("colmap"), "PATH")
-    for location in COMMON_LOCATIONS:
+    for location in toolpaths.colmap_locations():
         add(location, "common location")
     return found
 

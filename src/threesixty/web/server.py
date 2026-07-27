@@ -43,7 +43,16 @@ from ..project import (
     Project,
     ProjectError,
 )
-from .. import cameras, dataset, frames, motion, recent, segment, userpresets
+from .. import (
+    cameras,
+    dataset,
+    frames,
+    motion,
+    recent,
+    segment,
+    toolpaths,
+    userpresets,
+)
 from ..rig import PRESETS, Camera, Grade, Orientation, Output, Rig, RigError
 
 #: Occluder kinds a global rig preset may carry. `nadir_cone`/`zenith_cone` are angles
@@ -283,7 +292,8 @@ class Handler(BaseHTTPRequestHandler):
                     "stages": stages.readiness(self.session.project),
                 })
             elif route.path == "/api/system":
-                self._json({"tools": tool_survey()})
+                self._json({"tools": tool_survey(),
+                            "configured": toolpaths.stored()})
             elif route.path == "/api/project":
                 project = self.session.project
                 self._json({"project": self._project_payload(project)
@@ -381,6 +391,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.api_mask_preview(payload))
             elif route.path == "/api/mask/frame":
                 self._json(self.api_mask_frame(payload))
+            elif route.path == "/api/system/tools":
+                self._json(self.api_system_tools(payload))
             elif route.path == "/api/pick":
                 self._json(self.api_pick(payload))
             elif route.path == "/api/cancel":
@@ -1010,6 +1022,16 @@ class Handler(BaseHTTPRequestHandler):
                 self.session.cache / f"coverage_{camera.name}.png")
             coverage[camera.name] = geometric.ignored_fraction(self.session.ffmpeg, rendered)
         return {"coverage": coverage}
+
+    def api_system_tools(self, payload: dict) -> dict:
+        """Remember where a tool is, then report what that resolved to.
+
+        Answering with a fresh survey is the point: a path that does not hold the binary
+        should say so immediately, in the dialog, rather than at the start of a
+        reconstruction twenty minutes later.
+        """
+        configured = toolpaths.save_many(payload.get("tools") or {})
+        return {"tools": tool_survey(), "configured": configured}
 
     def api_pick(self, payload: dict) -> dict:
         """Raise a native file dialog. The browser cannot supply real paths itself."""

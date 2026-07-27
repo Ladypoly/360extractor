@@ -69,8 +69,27 @@ Most machines have several ffmpeg builds and the first on `PATH` is often an old
 360extract doctor
 ```
 
-Override with `--ffmpeg PATH` / `THREESIXTY_FFMPEG`, or `--colmap PATH` / `THREESIXTY_COLMAP`.
+### Where the tools are
+
+None of ffmpeg, COLMAP, [Brush](https://github.com/ArthurBrussee/brush) or
+[SuperSplat](https://github.com/playcanvas/supersplat) is a Python package, so none is a
+dependency — each is discovered, in this order:
+
+1. an explicit `--ffmpeg` / `--colmap` / `--brush` / `--supersplat` argument
+2. `THREESIXTY_FFMPEG` / `THREESIXTY_COLMAP` / `THREESIXTY_BRUSH` / `THREESIXTY_SUPERSPLAT`
+3. **a path set in the app's System status dialog**, saved to `~/.threesixty/tools.json`
+4. `PATH`
+5. the usual install locations
+
 Name a binary explicitly and it is used or the run fails — never silently substituted.
+Setting a path in System status re-runs the search immediately, so a path that holds no
+binary says so there rather than at the start of a reconstruction twenty minutes later.
+
+They are not bundled on purpose. ffmpeg is probed for a build that actually has `v360`,
+which a minimal bundled one may not; COLMAP's rig support and CUDA feature extraction are
+what this approach depends on, and `pycolmap` wheels ship neither; Brush is a Rust binary
+from GitHub releases. SuperSplat is a static web build and is the one that could reasonably
+be vendored one day.
 
 ## Quick start
 

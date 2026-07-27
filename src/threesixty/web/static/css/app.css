@@ -407,6 +407,14 @@ dialog::backdrop { background: rgba(0, 0, 0, .55); }
   padding: var(--s2) 0; border-bottom: 1px solid var(--border);
 }
 .tool-row:last-child { border-bottom: 0; }
+/* A settable row wraps: the path field gets its own line rather than squeezing the
+   detected path down to nothing. */
+.tool-row--settable { flex-wrap: wrap; }
+.tool-row--settable input {
+  flex: 1 0 100%; margin-top: var(--s1);
+  padding: 5px 8px; border: 1px solid var(--border); border-radius: 5px;
+  background: var(--control-bg); font: 11px var(--mono);
+}
 .tool-row__name { flex: 0 0 96px; font-weight: 600; }
 .tool-row__path {
   flex: 1; min-width: 0; color: var(--text-faint);

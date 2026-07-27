@@ -90,6 +90,10 @@ def _candidate_paths(explicit: str | os.PathLike[str] | None) -> list[tuple[Path
 
     add(explicit, "--ffmpeg")
     add(os.environ.get("THREESIXTY_FFMPEG"), "THREESIXTY_FFMPEG")
+
+    from . import toolpaths           # imported here: ffmpeg.py is imported very early
+    add(toolpaths.get("ffmpeg"), "configured")
+
     add(Path(__file__).parent / "bin", "bundled")
 
     # Every ffmpeg on PATH, not just the first: the first is often the oldest.
@@ -148,8 +152,8 @@ def resolve_ffmpeg(explicit: str | os.PathLike[str] | None = None) -> FFmpegInfo
     candidates = survey_ffmpeg(explicit)
     if not candidates:
         raise FFmpegError(
-            "no ffmpeg found. Install ffmpeg 5.0+ and put it on PATH, or pass --ffmpeg "
-            "/path/to/ffmpeg, or set THREESIXTY_FFMPEG."
+            "no ffmpeg found. Install ffmpeg 5.0+ and put it on PATH, pass --ffmpeg "
+            "/path/to/ffmpeg, set THREESIXTY_FFMPEG, or set its path in System status."
         )
 
     if explicit is not None:

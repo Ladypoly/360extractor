@@ -2,7 +2,8 @@
 
 Same discipline as `ffmpeg.py` and `colmap/locate.py` -- probe candidates, never trust
 PATH order alone, report what was found so `doctor` and the system-status dialog can
-show it, and allow an explicit override.
+show it, and allow an override. The order is: an explicit argument, the environment, a
+path the user configured once (`toolpaths.py`), `PATH`, then the usual install locations.
 """
 
 from __future__ import annotations
@@ -12,6 +13,8 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+from . import toolpaths
 
 BRUSH_LOCATIONS = (
     r"C:\Tools\brush-app-x86_64-pc-windows-msvc",
@@ -72,12 +75,13 @@ def find_brush(explicit: str | os.PathLike[str] | None = None) -> Tool:
 
     add(explicit, "--brush")
     add(os.environ.get("THREESIXTY_BRUSH"), "THREESIXTY_BRUSH")
+    add(toolpaths.get("brush"), "configured")
     for name in BRUSH_NAMES:
         found = shutil.which(name)
         if found:
             add(found, "PATH")
             break
-    for location in BRUSH_LOCATIONS:
+    for location in toolpaths.brush_locations():
         add(location, "common location")
 
     for path, source in candidates:
@@ -107,7 +111,8 @@ def find_supersplat(explicit: str | os.PathLike[str] | None = None) -> Tool:
 
     add(explicit, "--supersplat")
     add(os.environ.get("THREESIXTY_SUPERSPLAT"), "THREESIXTY_SUPERSPLAT")
-    for location in SUPERSPLAT_LOCATIONS:
+    add(toolpaths.get("supersplat"), "configured")
+    for location in toolpaths.supersplat_locations():
         add(location, "common location")
 
     for path, source in candidates:

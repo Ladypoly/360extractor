@@ -302,3 +302,82 @@ class TestSourcePaths:
         project = Project.create(root, sources=[str(root / "clip.mp4")])
         assert project.sources == ["clip.mp4"]
         assert project.resolved_sources() == [root / "clip.mp4"]
+
+
+class TestToolPathStore:
+    """Where the external tools are is a property of the machine, so it is stored per
+    user rather than per project -- and the environment still wins over it."""
+
+    def test_round_trips(self):
+        from threesixty import toolpaths
+
+        toolpaths.save("colmap", "/opt/colmap/bin/colmap")
+        assert toolpaths.get("colmap") == "/opt/colmap/bin/colmap"
+        assert toolpaths.stored() == {"colmap": "/opt/colmap/bin/colmap"}
+
+    def test_an_empty_value_clears_it(self):
+        from threesixty import toolpaths
+
+        toolpaths.save("brush", "/usr/bin/brush")
+        toolpaths.save("brush", "")
+        assert toolpaths.get("brush") == ""
+
+    def test_an_unknown_tool_is_refused(self):
+        from threesixty import toolpaths
+
+        with pytest.raises(ValueError, match="unknown tool"):
+            toolpaths.save("nonsense", "/x")
+
+    def test_a_configured_path_is_actually_used(self, tmp_path):
+        """The real chain, not a re-implementation of it."""
+        from threesixty import tools, toolpaths
+
+        binary = tmp_path / "brush.exe"
+        binary.write_bytes(b"")
+        toolpaths.save("brush", str(binary))
+
+        found = tools.find_brush()
+        assert found.path == binary
+        assert found.source == "configured"
+
+    def test_the_environment_wins_over_the_stored_path(self, tmp_path, monkeypatch):
+        """Exporting a variable for one run is a deliberate override of the settled
+        answer, so it has to come first."""
+        from threesixty import tools, toolpaths
+
+        stored = tmp_path / "stored.exe"
+        stored.write_bytes(b"")
+        chosen = tmp_path / "env.exe"
+        chosen.write_bytes(b"")
+        toolpaths.save("brush", str(stored))
+        monkeypatch.setenv("THREESIXTY_BRUSH", str(chosen))
+
+        found = tools.find_brush()
+        assert found.path == chosen
+        assert found.source == "THREESIXTY_BRUSH"
+
+    def test_an_explicit_argument_wins_over_both(self, tmp_path, monkeypatch):
+        from threesixty import tools, toolpaths
+
+        for name in ("stored", "env", "explicit"):
+            (tmp_path / f"{name}.exe").write_bytes(b"")
+        toolpaths.save("brush", str(tmp_path / "stored.exe"))
+        monkeypatch.setenv("THREESIXTY_BRUSH", str(tmp_path / "env.exe"))
+
+        found = tools.find_brush(tmp_path / "explicit.exe")
+        assert found.path == tmp_path / "explicit.exe"
+
+    def test_common_locations_are_not_one_machine_s_layout(self):
+        """A personal convention belongs at the end of the search, not the front."""
+        from threesixty import toolpaths
+
+        def personal(text):
+            return text.startswith("C:") and "Tools" in text
+
+        for locations in (toolpaths.colmap_locations(), toolpaths.brush_locations(),
+                          toolpaths.supersplat_locations()):
+            texts = [str(p) for p in locations]
+            mine = [i for i, text in enumerate(texts) if personal(text)]
+            rest = [i for i, text in enumerate(texts) if not personal(text)]
+            assert mine and rest
+            assert min(mine) > max(rest), texts
