@@ -76,18 +76,23 @@ def analyze(ffmpeg: FFmpegInfo, media: MediaInfo, start: float | None = None,
     return Sharpness(scores=scores)
 
 
-def choose(sharpness: Sharpness, source_fps: float, target_fps: float) -> list[int]:
-    """Pick the sharpest frame within each 1/target_fps window.
+def choose(sharpness: Sharpness, source_fps: float, window_seconds: float) -> list[int]:
+    """Pick the sharpest frame within each window of `window_seconds`.
+
+    A window, not a rate: 1 means the sharpest frame of every second, 0.5 the sharpest of
+    every half second. Saying it in seconds is what the setting is actually about -- how
+    far apart the kept frames are -- and it reads the same way at both ends of the range,
+    which "2 per second" and "0.5 per second" do not.
 
     Returns frame indices counted from the start of the analysed range, which is the
     same origin ffmpeg's `select` filter uses when given the same seek options.
     """
     if not sharpness.scores:
         return []
-    if target_fps <= 0:
-        raise ValueError(f"target fps must be positive, got {target_fps}")
+    if window_seconds <= 0:
+        raise ValueError(f"window must be a positive number of seconds, got {window_seconds}")
 
-    block = max(int(round(source_fps / target_fps)), 1) if source_fps else 1
+    block = max(int(round(source_fps * window_seconds)), 1) if source_fps else 1
     chosen = []
     for begin in range(0, len(sharpness.scores), block):
         window = range(begin, min(begin + block, len(sharpness.scores)))

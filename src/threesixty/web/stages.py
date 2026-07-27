@@ -77,7 +77,7 @@ def readiness(project: Project | None) -> dict[str, dict]:
     if project is None:
         blocked = {"ready": False, "reason": "Open or create a project first."}
         states = {stage: dict(blocked) for stage in
-                  ("capture", "reconstruct", "train", "inspect")}
+                  ("capture", "reconstruct", "train")}
         states["start"] = {"ready": True, "reason": ""}   # the entry point is always open
         return states
 
@@ -107,10 +107,6 @@ def readiness(project: Project | None) -> dict[str, dict]:
         "train": {
             "ready": sparse is not None,
             "reason": "" if sparse else "Run reconstruction before training.",
-        },
-        "inspect": {
-            "ready": bool(splats),
-            "reason": "" if splats else "No trained .ply file is available yet.",
         },
     }
 

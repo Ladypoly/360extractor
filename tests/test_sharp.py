@@ -89,32 +89,44 @@ class TestAnalysis:
 
 
 class TestChoosing:
+    """The window is stated in *seconds*: 0.5 keeps the sharpest of every half second."""
+
     def test_picks_one_frame_per_window(self):
         scores = sharp.Sharpness([float(i % 5) for i in range(50)])
-        chosen = sharp.choose(scores, source_fps=10, target_fps=2)
+        chosen = sharp.choose(scores, source_fps=10, window_seconds=0.5)
         assert len(chosen) == 10
 
     def test_picks_the_sharpest_in_each_window(self):
         # Lower is sharper; frame 3 of each block of 5 is the best.
         scores = sharp.Sharpness([9, 9, 9, 1, 9] * 4)
-        chosen = sharp.choose(scores, source_fps=10, target_fps=2)
+        chosen = sharp.choose(scores, source_fps=10, window_seconds=0.5)
         assert chosen == [3, 8, 13, 18]
 
-    def test_target_above_source_rate_keeps_every_frame(self):
+    def test_one_second_windows_give_one_frame_a_second(self):
+        scores = sharp.Sharpness([1.0] * 50)
+        assert len(sharp.choose(scores, source_fps=10, window_seconds=1)) == 5
+
+    def test_a_longer_window_keeps_fewer_frames(self):
+        scores = sharp.Sharpness([1.0] * 60)
+        half = sharp.choose(scores, source_fps=10, window_seconds=0.5)
+        two = sharp.choose(scores, source_fps=10, window_seconds=2)
+        assert len(half) > len(two)
+
+    def test_a_window_shorter_than_a_frame_keeps_every_frame(self):
         scores = sharp.Sharpness([1.0] * 10)
-        assert sharp.choose(scores, source_fps=10, target_fps=30) == list(range(10))
+        assert sharp.choose(scores, source_fps=10, window_seconds=0.01) == list(range(10))
 
     def test_handles_a_ragged_final_window(self):
         scores = sharp.Sharpness([5, 4, 3, 2])  # 4 frames, blocks of 3
-        chosen = sharp.choose(scores, source_fps=9, target_fps=3)
+        chosen = sharp.choose(scores, source_fps=9, window_seconds=1 / 3)
         assert chosen == [2, 3]
 
-    def test_rejects_nonpositive_target(self):
-        with pytest.raises(ValueError, match="must be positive"):
-            sharp.choose(sharp.Sharpness([1.0]), source_fps=10, target_fps=0)
+    def test_rejects_a_nonpositive_window(self):
+        with pytest.raises(ValueError, match="positive number of seconds"):
+            sharp.choose(sharp.Sharpness([1.0]), source_fps=10, window_seconds=0)
 
     def test_empty_analysis_yields_nothing(self):
-        assert sharp.choose(sharp.Sharpness([]), source_fps=10, target_fps=2) == []
+        assert sharp.choose(sharp.Sharpness([]), source_fps=10, window_seconds=0.5) == []
 
 
 class TestSelectExpression:

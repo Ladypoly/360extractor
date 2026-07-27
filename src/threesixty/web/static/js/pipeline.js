@@ -12,7 +12,6 @@ export const STAGES = [
   { key: "capture",     label: "Capture",     iconName: "camera" },
   { key: "reconstruct", label: "Reconstruct", iconName: "reconstruct" },
   { key: "train",       label: "Train",       iconName: "train" },
-  { key: "inspect",     label: "Inspect",     iconName: "inspect" },
 ];
 
 const STATE_ICON = {
@@ -103,5 +102,5 @@ export function Pipeline({ onSelect }) {
 /** Pipeline stages and project stages are not quite the same set. */
 function stageToProject(key) {
   return { capture: "extract", reconstruct: "export",
-           train: "train", inspect: "clean" }[key] || key;
+           train: "train" }[key] || key;
 }

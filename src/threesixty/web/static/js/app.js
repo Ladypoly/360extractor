@@ -12,7 +12,6 @@ import { StartStage } from "./stages/start.js";
 import { CaptureStage } from "./stages/capture.js";
 import { ReconstructStage } from "./stages/reconstruct.js";
 import { TrainStage } from "./stages/train.js";
-import { InspectStage } from "./stages/inspect.js";
 
 const POLL_IDLE = 1500;
 const POLL_ACTIVE = 400;
@@ -294,7 +293,6 @@ async function boot() {
   stages.capture = CaptureStage(context);
   stages.reconstruct = ReconstructStage(context);
   stages.train = TrainStage(context);
-  stages.inspect = InspectStage(context);
 
   for (const stage of STAGES) {
     const panel = stages[stage.key].panel;

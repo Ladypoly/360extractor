@@ -28,7 +28,13 @@ from .ffmpeg import (
     survey_ffmpeg,
 )
 from .mask import apply as mask_apply
-from .plan import DEFAULT_MAX_STREAMS, FrameSelection, plan_extraction, safe_stem
+from .plan import (
+    DEFAULT_MAX_STREAMS,
+    FrameSelection,
+    frames_per_second,
+    plan_extraction,
+    safe_stem,
+)
 from .project import STAGES, Project, ProjectError
 from .rig import PRESETS, Output, Rig, RigError, cube, dome, handheld, ring, car_forward
 
@@ -286,7 +292,7 @@ def _write_geo_registration(project, clip: str, gpx_path: str, ffmpeg):
 
     selection = FrameSelection(mode=project.frames.mode, value=project.frames.value,
                               start=project.frames.start, end=project.frames.end)
-    per_second = selection.value if selection.mode in {"fps", "sharp"} else 1.0
+    per_second = frames_per_second(selection.mode, selection.value)
     start = selection.start or 0.0
 
     entries = {}
@@ -886,9 +892,10 @@ def build_parser() -> argparse.ArgumentParser:
     frames = extract.add_mutually_exclusive_group()
     frames.add_argument("--fps", type=float, default=2.0,
                         help="sample this many frames per second (default 2)")
-    frames.add_argument("--sharp", type=float, metavar="FPS",
-                        help="like --fps, but keep the sharpest frame in each window "
-                             "instead of whatever lands on the tick (skips motion blur)")
+    frames.add_argument("--sharp", type=float, metavar="SECONDS",
+                        help="keep the sharpest frame of every SECONDS of source "
+                             "(0.5 = one every half second), instead of whatever lands "
+                             "on the tick -- this is what skips motion blur")
     frames.add_argument("--every", type=int, metavar="N", help="take every Nth source frame")
     frames.add_argument("--all-frames", action="store_true", help="extract every source frame")
 

@@ -94,13 +94,28 @@ class FrameSelection:
         duration = max(duration, 0.0)
 
         if self.mode == "sharp":
-            return len(self.frames) if self.frames else max(int(duration * self.value), 1)
+            # `value` is a window in seconds here, not a rate.
+            return (len(self.frames) if self.frames
+                    else max(int(duration / max(self.value, 1e-6)), 1))
         if self.mode == "fps":
             return max(int(duration * self.value), 1)
         source_frames = int(duration * media.fps) if media.fps else media.frame_count
         if self.mode == "every":
             return max(source_frames // int(self.value), 1)
         return max(source_frames, 1)
+
+
+def frames_per_second(mode: str, value: float) -> float:
+    """How many frames each second of source yields, for placing them back in time.
+
+    `sharp` states a *window* in seconds, so it is the reciprocal of a rate; `fps` is
+    already one. Geo-registration needs this to date each extracted frame.
+    """
+    if mode == "fps":
+        return value if value > 0 else 1.0
+    if mode == "sharp":
+        return 1.0 / value if value > 0 else 1.0
+    return 1.0
 
 
 def camera_size(camera: Camera, rig: Rig, media: MediaInfo) -> tuple[int, int]:

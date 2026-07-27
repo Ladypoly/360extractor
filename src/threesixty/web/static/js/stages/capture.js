@@ -160,7 +160,7 @@ export function CaptureStage(ctx) {
 
   // Frame selection lives on the Start tab now; these elements back the legacy dialog.
   const frameMode = el("select", {},
-    ...[["sharp", "sharpest per second"], ["fps", "every N per second"],
+    ...[["sharp", "sharpest frame every N seconds"], ["fps", "every N per second"],
         ["every", "every Nth frame"], ["all", "all frames"]]
       .map(([value, label]) => el("option", { value }, label)));
   const frameValue = el("input", { type: "number", value: 2, step: 0.5, min: 0.1 });

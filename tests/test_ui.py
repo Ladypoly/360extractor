@@ -22,7 +22,7 @@ pytestmark = [pytest.mark.ffmpeg, pytest.mark.ui]
 sync_playwright = pytest.importorskip(
     "playwright.sync_api", reason="playwright is not installed").sync_playwright
 
-STAGES = ["start", "capture", "reconstruct", "train", "inspect"]
+STAGES = ["start", "capture", "reconstruct", "train"]
 
 
 def free_port():
@@ -201,14 +201,13 @@ class TestStageOwnership:
         capture = page.locator("#stage-panel-capture .actionbar")
         assert "Extract frames" in capture.inner_text()
 
-        for key in ["reconstruct", "train", "inspect"]:
+        for key in ["reconstruct", "train"]:
             text = page.locator(f"#stage-panel-{key} .actionbar").inner_text()
             assert "Extract" not in text, f"{key} offers an Extract action"
 
     @pytest.mark.parametrize("key,label", [
         ("capture", "Extract frames"),
         ("reconstruct", "Run All"), ("train", "Start Training"),
-        ("inspect", "Apply Cleanup"),
     ])
     def test_each_stage_has_its_own_primary_action(self, page, key, label):
         bar = page.locator(f"#stage-panel-{key} .actionbar__actions")
@@ -222,7 +221,7 @@ class TestStageOwnership:
 
 class TestGating:
     def test_later_stages_are_disabled_before_extraction(self, page):
-        for key in ["train", "inspect"]:
+        for key in ["train"]:
             assert page.locator(f"#stage-tab-{key}").is_disabled(), \
                 f"{key} should not be available yet"
 
@@ -230,9 +229,6 @@ class TestGating:
         """Hiding the reason is what makes a disabled control infuriating."""
         title = page.locator("#stage-tab-train").get_attribute("title")
         assert "reconstruction" in title.lower()
-
-        title = page.locator("#stage-tab-inspect").get_attribute("title")
-        assert ".ply" in title.lower() or "trained" in title.lower()
 
     def test_capture_is_available(self, page):
         assert not page.locator("#stage-tab-capture").is_disabled()
@@ -322,3 +318,23 @@ def test_screenshot(page, key, tmp_path_factory):
     output = tmp_path_factory.mktemp("shots") / f"{key}.png"
     page.screenshot(path=str(output))
     assert output.exists() and output.stat().st_size > 5000
+
+
+class TestCleanupMovedIntoTrain:
+    """Inspect is gone -- SuperSplat covers the viewing -- but the splat cleanup was
+    never SuperSplat's to do, and had to come along rather than disappear."""
+
+    def test_there_is_no_inspect_tab(self, page):
+        assert page.locator("#stage-tab-inspect").count() == 0
+        assert page.locator("#stage-panel-inspect").count() == 0
+
+    # Read the markup rather than clicking: a stage panel that is not the active one is
+    # hidden, so nothing inside it can be interacted with from here.
+    def test_train_offers_the_cleanup(self, page):
+        markup = page.locator("#stage-panel-train .inspector").inner_html()
+        assert "Splat cleanup" in markup
+
+    def test_the_cleanup_controls_came_with_it(self, page):
+        markup = page.locator("#stage-panel-train .inspector").inner_html()
+        for label in ("radius", "floor", "Preview", "Apply"):
+            assert label in markup, f"cleanup lost its {label} control"

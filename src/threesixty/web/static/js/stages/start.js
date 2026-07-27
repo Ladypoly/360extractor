@@ -68,11 +68,14 @@ export function StartStage(ctx) {
 
   const framesSection = InspectorSection("Frames", { id: "start-frames" });
   const frameMode = el("select", {},
-    ...[["sharp", "sharpest per second"], ["fps", "every N per second"],
+    ...[["sharp", "sharpest frame every N seconds"], ["fps", "every N per second"],
         ["every", "every Nth frame"], ["all", "all frames"]]
       .map(([value, label]) => el("option", { value }, label)));
-  const frameValue = el("input", { type: "number", value: 2, step: 0.5, min: 0.1 });
+  const frameValue = el("input", { type: "number", value: 0.5, step: 0.1, min: 0.05 });
   const estimate = el("p", { class: "hint" });
+  // The unit changes with the mode: `sharp` states a window in seconds, `fps` a rate.
+  const frameValueLabel = el("label", {}, "seconds");
+  const frameValueField = el("div", { class: "field" }, frameValueLabel, frameValue);
   // Re-decoding an 8K source takes tens of minutes, so a project that has already been
   // imported says so and Process leaves it alone unless this is ticked.
   const reextract = el("input", { type: "checkbox" });
@@ -81,13 +84,20 @@ export function StartStage(ctx) {
     el("span", { class: "imported__text" }),
     el("span", { class: "imported__redo" }, reextract, "re-extract"));
   framesSection.body.append(
-    importedNote, field("frames", frameMode), field("rate", frameValue), estimate);
+    importedNote, field("frames", frameMode), frameValueField, estimate);
   reextract.addEventListener("change", syncImported);
   frameMode.addEventListener("change", () => {
     frameValue.disabled = frameMode.value === "all";
-    frameValue.value = frameMode.value === "every" ? 10 : 2;
+    frameValue.value = { every: 10, fps: 2, sharp: 0.5 }[frameMode.value] ?? 2;
+    syncFrameUnit();
     updateEstimate(); ctx.autosave();
   });
+
+  function syncFrameUnit() {
+    frameValueLabel.textContent =
+      { sharp: "seconds", fps: "per second", every: "every Nth" }[frameMode.value] || "value";
+    frameValueField.hidden = frameMode.value === "all";
+  }
   frameValue.addEventListener("change", () => { updateEstimate(); ctx.autosave(); });
 
   // ── segments ─────────────────────────────────────────────────────────
@@ -166,12 +176,13 @@ export function StartStage(ctx) {
     const mode = frameMode.value, value = parseFloat(frameValue.value) || 1;
     let frames = 1;
     if (media.is_video) {
-      if (mode === "fps" || mode === "sharp") frames = Math.max(Math.floor(media.duration * value), 1);
+      if (mode === "sharp") frames = Math.max(Math.floor(media.duration / (value || 1)), 1);
+      else if (mode === "fps") frames = Math.max(Math.floor(media.duration * value), 1);
       else if (mode === "every") frames = Math.max(Math.floor(media.frame_count / value), 1);
       else frames = media.frame_count;
     }
     estimate.textContent = `~${frames} frames`
-      + (mode === "sharp" ? " (sharpest in each second)" : "");
+      + (mode === "sharp" ? ` (sharpest in each ${value}s)` : "");
   }
 
   function updateMediaInfo() {
@@ -401,6 +412,7 @@ export function StartStage(ctx) {
   }
 
   updateSegFields();
+  syncFrameUnit();
 
   return {
     panel,
@@ -429,6 +441,7 @@ export function StartStage(ctx) {
       if (!project) return;
       frameMode.value = project.frames.mode;
       frameValue.value = project.frames.value;
+      syncFrameUnit();
       writeMasking(project.detect);
       updateEstimate();
       if (project.sources && project.sources.length) pathField.value = project.sources[0];

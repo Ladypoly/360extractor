@@ -27,7 +27,13 @@ from ..mask import geometric
 from ..tools import survey as tool_survey
 from ..extract import run_extraction
 from ..ffmpeg import FFmpegError, MediaInfo, probe_media, resolve_ffmpeg
-from ..plan import FrameSelection, camera_size, plan_extraction, safe_stem
+from ..plan import (
+    FrameSelection,
+    camera_size,
+    frames_per_second as plan_frames_per_second,
+    plan_extraction,
+    safe_stem,
+)
 from ..project import (
     PROJECT_FILENAME,
     STAGES,
@@ -584,7 +590,7 @@ class Handler(BaseHTTPRequestHandler):
         if not images_root.exists():
             raise ValueError(f"{images_root} does not exist; extract first")
 
-        per_second = project.frames.value if project.frames.mode in {"fps", "sharp"} else 1.0
+        per_second = plan_frames_per_second(project.frames.mode, project.frames.value)
         start = project.frames.start or 0.0
 
         entries = {}
@@ -1323,6 +1329,11 @@ class Handler(BaseHTTPRequestHandler):
             "step": stages.exported_step(newest),
             "mtime": newest.stat().st_mtime,
             "bytes": newest.stat().st_size,
+            # Every export, so the cleanup can be pointed at an earlier one without
+            # having to have watched the run that produced it.
+            "splats": [{"path": str(p), "relative": project.relative(p),
+                        "name": p.name, "step": stages.exported_step(p)}
+                       for p in found],
         }
 
     def api_frames_list(self) -> dict:

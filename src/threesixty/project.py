@@ -25,7 +25,7 @@ from typing import Any
 
 from .rig import Rig, RigError, ring
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 PROJECT_FILENAME = "project.json"
 
 #: Every step whose completion is worth remembering, in the order it invalidates.
@@ -50,7 +50,9 @@ class FrameSettings:
     """How frames are chosen from each source."""
 
     mode: str = "sharp"
-    value: float = 2.0
+    #: For `sharp` this is a window in *seconds* -- 0.5 keeps the sharpest frame of every
+    #: half second. For `fps` it is a rate. See `plan.frames_per_second`.
+    value: float = 0.5
     start: float | None = None
     end: float | None = None
 
@@ -265,13 +267,22 @@ class Project:
         except (RigError, KeyError) as exc:
             raise ProjectError(f"project contains an invalid rig: {exc}") from exc
 
+        frames = dict(data.get("frames", {}))
+        # v1 stated the sharp setting as a rate (2 = two frames a second); v2 states the
+        # window (0.5 = one every half second). Converting on load keeps an old project
+        # extracting the same frames it always did, instead of silently taking a quarter
+        # of them.
+        if version < 2 and frames.get("mode") == "sharp":
+            rate = float(frames.get("value") or 0)
+            frames["value"] = round(1.0 / rate, 6) if rate > 0 else 0.5
+
         try:
             project = cls(
                 root=root,
                 name=data.get("name", root.name),
                 sources=list(data.get("sources", [])),
                 rig=rig,
-                frames=FrameSettings(**data.get("frames", {})),
+                frames=FrameSettings(**frames),
                 output=OutputSettings(**data.get("output", {})),
                 detect=DetectSettings(**data.get("detect", {})),
                 created=data.get("created", ""),
