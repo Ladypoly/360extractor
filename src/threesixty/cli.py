@@ -946,8 +946,8 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--max-streams", type=int, default=DEFAULT_MAX_STREAMS,
                          help=f"cameras per ffmpeg pass (default {DEFAULT_MAX_STREAMS})")
     extract.add_argument("--layout", choices=["brush", "flat"], default="brush",
-                         help="brush: <out>/images/<clip>/<camera>/ with masks/ mirroring it, "
-                              "which Brush and COLMAP both read (default). flat: the older shape")
+                         help="brush: <out>/images/<camera>/{images,masks}/, which Brush "
+                              "and COLMAP both read (default). flat: the older shape")
     extract.add_argument("--mask", choices=["sidecar", "skip", "burn", "none"],
                          default="sidecar",
                          help="what to do about the rig's occluders. sidecar: write a mask "
