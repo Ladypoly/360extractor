@@ -30,10 +30,12 @@ COLMAP_REGISTERING = ProgressPattern(
 COLMAP_FEATURES = ProgressPattern(
     re.compile(r"Processed file \[(\d+)/(\d+)\]"), message="extracting features")
 
-#: Brush prints its step counter; accept a few plausible shapes rather than betting on
-#: one, since this is cosmetic and a miss only costs a smooth bar.
+#: Brush's step counter, as indicatif draws it: `{pos:>7}/{len:7}` inside a repainting
+#: bar, with no words around it. The old pattern insisted on a "step"/"iter" prefix that
+#: is simply not in the output, so the bar never moved -- a bare `N/M` is what to look
+#: for, and the fraction is clamped anyway.
 BRUSH_STEPS = ProgressPattern(
-    re.compile(r"(?:step|iter\w*)\D{0,4}(\d+)\s*/\s*(\d+)", re.I), message="training")
+    re.compile(r"(?:step|iter\w*)?\D{0,4}?(\d+)\s*/\s*(\d+)", re.I), message="training")
 
 
 class StageError(RuntimeError):

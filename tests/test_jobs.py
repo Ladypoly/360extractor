@@ -8,6 +8,8 @@ Two properties come straight from the brief and are the reason this exists:
   restores percentage, message and log.
 """
 
+import re
+import sys
 import threading
 import time
 
@@ -239,3 +241,68 @@ class TestRegistry:
         registry.cancel_all()
         assert wait_for(registry["capture"], "cancelled")
         assert wait_for(registry["refine"], "cancelled")
+
+
+class TestCarriageReturnProgress:
+    """The reported bug: Brush sat at "0 of 30000" for 13 minutes while training was
+    most of the way done. It draws its bar with indicatif, which repaints in place --
+    carriage return, redraw, never a newline -- so iterating over lines saw nothing."""
+
+    def _bar_program(self, tmp_path, total=5):
+        """A child that behaves like indicatif: one line, repainted, no newlines."""
+        script = tmp_path / "bar.py"
+        # Control characters via chr(), so nothing depends on escaping surviving the
+        # trip into a generated file.
+        script.write_text(
+            "import sys, time\n"
+            "CR, ESC = chr(13), chr(27)\n"
+            f"for i in range(1, {total} + 1):\n"
+            "    sys.stdout.write(CR + ESC + '[36m[####>---]' + ESC + '[0m '\n"
+            f"                     + '%d/%d (eta 1s)' % (i, {total}))\n"
+            "    sys.stdout.flush()\n"
+            "    time.sleep(0.01)\n"
+            "sys.stdout.write(chr(10) + 'done' + chr(10))\n", encoding="utf-8")
+        return [sys.executable, str(script)]
+
+    def test_progress_reaches_the_job(self, tmp_path):
+        from threesixty.web.runner import ProgressPattern, run
+
+        job = Job("train")
+        seen = []
+        original = job.update
+
+        def spy(**fields):
+            if "fraction" in fields:
+                seen.append(fields["fraction"])
+            original(**fields)
+
+        job.update = spy
+        result = run(job, self._bar_program(tmp_path),
+                     progress=ProgressPattern(re.compile(r"(\d+)\s*/\s*(\d+)")))
+
+        assert result.ok
+        assert seen, "a carriage-return progress bar never moved the job"
+        assert max(seen) == pytest.approx(1.0)
+
+    def test_repaints_do_not_fill_the_log(self, tmp_path):
+        """Hundreds of bar frames would push the real output out of a bounded log."""
+        from threesixty.web.runner import ProgressPattern, run
+
+        job = Job("train")
+        result = run(job, self._bar_program(tmp_path, total=40),
+                     progress=ProgressPattern(re.compile(r"(\d+)\s*/\s*(\d+)")))
+
+        assert [line for line in result.lines if "done" in line]
+        # The very last frame is terminated by the newline that ends the bar, so it is
+        # a real line by then. One is not a flood; forty would be.
+        assert len([line for line in result.lines if "eta" in line]) <= 1
+
+    def test_ordinary_lines_still_arrive(self, tmp_path):
+        from threesixty.web.runner import run
+
+        script = tmp_path / "plain.py"
+        script.write_text("print('first')\nprint('second')\n", encoding="utf-8")
+        job = Job("train")
+        result = run(job, [sys.executable, str(script)])
+
+        assert result.lines == ["first", "second"]

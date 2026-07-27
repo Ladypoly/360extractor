@@ -11,6 +11,7 @@ running would hold the database and quietly corrupt the next attempt.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import threading
@@ -23,6 +24,22 @@ from .jobs import Cancelled, Job
 
 #: How often a cancelled process is checked before it is killed outright.
 GRACE_SECONDS = 8
+
+#: Output is split on *either* terminator, and which one it was matters.
+#:
+#: Brush draws its progress with indicatif, which repaints in place: carriage return,
+#: redraw, no newline, ever. Iterating over lines therefore sees nothing at all until
+#: the process exits -- which is exactly what "13 minutes at 0 of 30000 steps" looked
+#: like, while training was in fact most of the way done.
+#:
+#: A `\r`-terminated piece is a repaint of the same status, so it drives the progress
+#: bar but is not appended to the log; a `\n`-terminated one is a real line.
+#:
+#: `\r\n` has to be matched before a bare `\r`, or on Windows -- where every ordinary
+#: line ends that way -- all real output would be mistaken for bar repaints and dropped.
+_PIECE = re.compile(r"([^\r\n]*)(\r\n|\r|\n)")
+#: Cursor moves and colours from a redrawing progress bar, which are noise in a log.
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
 
 #: Lines matching these are worth colouring in the log viewer. COLMAP prefixes its
 #: severity, and most tools shout in a recognisable way.
@@ -106,30 +123,51 @@ def run(job: Job, argv: Sequence[str], *, cwd: Path | None = None,
         cwd=str(cwd) if cwd else None,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,     # one stream: interleaving is what a log wants
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        bufsize=1,
+        # Bytes, unbuffered: a redrawing progress bar has to reach us as it is written,
+        # and Python's line iteration would sit on it waiting for a newline that a
+        # carriage-return bar never sends.
+        bufsize=0,
     )
 
     lines: list[str] = []
     watcher = threading.Thread(target=_watch_for_cancel, args=(job, process), daemon=True)
     watcher.start()
 
-    assert process.stdout is not None
-    for raw in process.stdout:
-        line = raw.rstrip("\r\n")
-        if not line.strip():
-            continue
-        lines.append(line)
-        job.log(line, classify(line))
-        if on_line:
-            on_line(line)
+    def handle(text: str, transient: bool) -> None:
+        line = _ANSI.sub("", text).strip()
+        if not line:
+            return
         if progress:
             read = progress.read(line)
             if read:
                 fraction, message = read
                 job.update(fraction=base + fraction * span, message=message)
+                if transient:
+                    return          # a repaint of the bar is not a log line
+        if transient:
+            return
+        lines.append(line)
+        job.log(line, classify(line))
+        if on_line:
+            on_line(line)
+
+    assert process.stdout is not None
+    pending = ""
+    while True:
+        try:
+            chunk = os.read(process.stdout.fileno(), 8192)
+        except OSError:
+            break
+        if not chunk:
+            break
+        pending += chunk.decode("utf-8", "replace")
+        last = 0
+        for piece in _PIECE.finditer(pending):
+            handle(piece.group(1), piece.group(2) == "\r")
+            last = piece.end()
+        pending = pending[last:]
+    if pending:
+        handle(pending, False)
 
     process.wait()
     if job.cancel.is_set():
