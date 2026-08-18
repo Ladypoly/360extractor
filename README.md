@@ -1,12 +1,36 @@
 # 360extract
 
-Turn 360° equirectangular footage into a trained 3D Gaussian splat — with precise control over
-**which directions get extracted**, so the person holding the camera or the car it was mounted
-on never reaches your dataset.
+A 360° video is not a photogrammetry dataset. It is one wide-angle recording of a rig driving
+or walking through a scene, with the rig itself, its mount, and whoever is holding it baked
+into every single frame. Turning that into a clean 3D Gaussian splat means cutting it into
+per-camera tiles with known geometry, keeping the operator and the vehicle out of what gets
+trained, anchoring the result to real-world scale, and cleaning up what a trainer invents in
+the volume no camera could ever see. 360extract is the pipeline that does all of that, driving
+ffmpeg, COLMAP and Brush as one tool instead of five hand-run ones — see
+[The pipeline](#the-pipeline) below for the shape of it.
+
+## Why 360extract
+
+**What it gets you that stitching together the tools by hand does not:**
+
+| | 360extract | doing it by hand |
+|---|---|---|
+| Decode cost | source decoded **once**, fanned out to every camera | once per camera, N× the cost |
+| Camera poses | known exactly, handed to COLMAP — it only solves the trajectory | estimated by SfM — drifts, and can disagree between cameras |
+| Rig / operator in the dataset | masked out before training: static occluders per-camera, moving ones by open-vocab detection, reconciled across overlapping cameras | present in the frames, or removed by hand, one image at a time |
+| Frame selection | sharpest frame in each window, so blur never reaches COLMAP | usually just "every Nth frame," blur included |
+| Scale | GPX track anchors the model in real units | arbitrary units, nothing to size a cleanup radius against |
+| Rig-shaped floaters (the volume the rig occupied, which no camera ever saw) | `clean-splat` removes them, with a floor so the road under the vehicle survives | usually invisible until you spot the ghost trail down the middle of your splat |
+| Resuming after a setting change | project fingerprints each stage; only stale ones re-run | re-run everything, or track it yourself |
+
+Every row above is backed by a real measurement further down this file, not a promise — see
+[Verified on real footage](#verified-on-real-footage) for a full run, and the sections on
+[frame selection](#frame-selection), [masking](#masking-keeping-the-rig-out-of-the-dataset) and
+[floater removal](#removing-floaters-where-the-rig-was) for the numbers behind each row.
 
 > **Status: pre-1.0 and under active development.** The whole pipeline has been run end to end
 > on real footage — see [Verified on real footage](#verified-on-real-footage) — and is covered
-> by over 740 tests, including tests that drive real COLMAP. Interfaces may still change
+> by over 790 tests, including tests that drive real COLMAP. Interfaces may still change
 > without notice.
 
 ```bash
@@ -21,10 +45,11 @@ brush dataset/ --total-steps 30000 --export-path dataset/splat
 
 ## Contents
 
-- [The pipeline](#the-pipeline) · [Install](#install) · [Quick start](#quick-start)
+- [Why 360extract](#why-360extract) · [The pipeline](#the-pipeline) · [Install](#install) · [Quick start](#quick-start)
 - [**CLI reference**](#cli-reference) — every command, with examples
 - [The app](#the-app) · [Projects](#projects) · [Rigs](#rigs)
-- [Frame selection](#frame-selection) · [Grading](#grading) · [Output size](#output-size)
+- [Frame selection](#frame-selection) · [Source projection](#source-projection-dual-fisheye)
+- [Grading](#grading) · [Output size](#output-size)
 - [Masking](#masking-keeping-the-rig-out-of-the-dataset)
 - [Reconstructing, training, cleaning](#reconstructing-training-and-cleaning)
 - [Output layout](#output-layout) · [Verified on real footage](#verified-on-real-footage)
@@ -157,7 +182,9 @@ structure-from-motion.
 ```
 
 Dimensions, aspect, codec, frame rate, duration, estimated frame count. Warns when a source
-is not 2:1 — extraction will still run, but the geometry will be wrong.
+is not 2:1 — extraction will still run, but the geometry will be wrong. A camera's *raw*
+two-lens file is 2:1 as well, so the warning says nothing about it; declare that one with
+`--projection dfisheye` (see [Source projection](#source-projection-dual-fisheye)).
 
 ## `rig`
 
@@ -194,6 +221,8 @@ Presets are accepted anywhere a rig file is, so `--rig ring` works without writi
 | `--every N` | every Nth source frame |
 | `--all-frames` | everything |
 | `--start SEC` / `--end SEC` | limit to a time window |
+| `--projection {equirect,dfisheye,fisheye}` | what the footage is (default `equirect`) |
+| `--lens-fov DEG` | field of view of one lens, for the fisheye projections (default 190) |
 | `--classes ...` | what masking removes; an empty list disables masking |
 | `--name`, `--force` | project name; replace an existing `project.json` |
 
@@ -221,6 +250,7 @@ This is the command to reach for; `extract` and `mask` below are the project-les
 
 Frame selection: `--sharp SECONDS` · `--fps N` · `--every N` · `--all-frames` ·
 `--start SEC` · `--end SEC`.
+Source: `--projection {equirect,dfisheye,fisheye}` · `--lens-fov DEG`.
 Output: `-o/--output-dir` · `--width` / `--height` · `--layout {brush,flat}` ·
 `--max-streams` (cameras per ffmpeg pass, default 8).
 Occluders: `--nadir DEG` · `--mask {sidecar,skip,burn,none}`.
@@ -422,6 +452,48 @@ The idea is [Florian Bruggisser's sharp-frame-extractor](https://github.com/cans
 
 Sampling uniformly in *time* is the right basis for photogrammetry: a capture that pauses does
 not then flood the dataset with near-duplicates from wherever the operator stopped walking.
+
+---
+
+## Source projection (dual fisheye)
+
+Most 360 cameras write **two** files for the same shot: a stitched equirectangular one, and the
+raw one straight off the two lenses — two circular images side by side. 360extract reads either.
+
+```bash
+360extract project new dataset/ --source VID_raw.insv --rig car-forward     --projection dfisheye --lens-fov 190
+360extract extract RAW.mp4 --rig ring --projection dfisheye -o dataset/
+```
+
+In the app it is the **projection** dropdown in Start ▸ Source, beside the file. Pick
+`dual fisheye` and the panorama appears on the canvas; the lens field of view sits under it
+(190° is the usual figure — check the camera's specs).
+
+| `--projection` | The source is |
+|---|---|
+| `equirect` | a stitched 360 file, 2:1 (the default) |
+| `dfisheye` | a raw file with both lenses side by side |
+| `fisheye` | one lens, covering less than the sphere |
+
+**Why bother with the raw file.** The camera's stitch is a resample, and often a lossy re-encode
+on top of it. Feeding the raw file means the pixels are resampled exactly once — by the same
+`v360` that cuts the camera tiles — instead of twice. Tiles come out of a dual-fisheye source
+essentially identical to tiles cut from the stitched panorama of the same footage: the front
+camera measures ~36 dB PSNR against its stitched counterpart on the synthetic clip in
+`tests/test_extract_integration.py` (a wrong projection would land near 10), and 74 dB on a
+lossless still, where the h.264 in that clip is not part of the difference.
+
+**You have to say so.** A raw two-lens file is 2:1 as well, so nothing about its dimensions
+gives it away. Left as `equirect` it extracts happily and produces a dataset of the wrong
+directions — which COLMAP will try, and fail, to reconstruct.
+
+**What it costs.** The two lenses share the frame's width, so a 5760-wide dual fisheye at 190°
+carries the same detail as a 5456-wide panorama, and that is the size the working set and the
+automatic tile sizes are computed from. Stitching seams and blending are the camera's job, not
+this tool's: `v360` maps each lens's own circle, and the small overlap between them is where a
+real stitcher would blend. For most photogrammetry that is fine — features near the seam are
+covered by the neighbouring camera anyway — but if your footage has heavy parallax right at the
+seam, the camera's own stitch may match better there.
 
 ## Grading
 
