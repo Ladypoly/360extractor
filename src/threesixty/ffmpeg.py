@@ -196,6 +196,10 @@ class MediaInfo:
     frame_count: int
     codec: str
     is_video: bool
+    #: How many video streams the file carries. Two means a camera that gave each lens
+    #: its own track (the QooCam 8K does), which is a different source shape entirely --
+    #: nothing about the first stream's dimensions reveals the second one exists.
+    video_streams: int = 1
 
     @property
     def aspect(self) -> float:
@@ -205,6 +209,11 @@ class MediaInfo:
     def looks_equirectangular(self) -> bool:
         # Equirect is 2:1 by definition. Allow a little slack for odd encoder padding.
         return 1.9 <= self.aspect <= 2.1
+
+    @property
+    def looks_circular(self) -> bool:
+        """Square-ish, which is what a single fisheye circle is stored as."""
+        return 0.95 <= self.aspect <= 1.05
 
 
 def _parse_fraction(value: str | None) -> float:
@@ -232,7 +241,7 @@ def probe_media(path: str | os.PathLike[str], ffmpeg: FFmpegInfo | None = None) 
     ffmpeg = ffmpeg or resolve_ffmpeg()
     argv = [
         str(ffprobe_for(ffmpeg)), "-hide_banner", "-loglevel", "error",
-        "-select_streams", "v:0",
+        "-select_streams", "v",
         "-show_entries", "stream=width,height,r_frame_rate,nb_frames,codec_name,duration",
         "-show_entries", "format=duration",
         "-of", "json", str(media_path),
@@ -277,4 +286,5 @@ def probe_media(path: str | os.PathLike[str], ffmpeg: FFmpegInfo | None = None) 
         frame_count=max(frame_count, 1),
         codec=codec,
         is_video=is_video,
+        video_streams=len(streams),
     )

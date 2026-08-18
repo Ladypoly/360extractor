@@ -19,6 +19,9 @@ const POLL_ACTIVE = 400;
 export const state = {
   project: null,
   media: null,
+  //: What the footage is, and which of its two pictures the rig is placed on.
+  sourceFormat: null,
+  sourceView: "panorama",
   jobs: {},
   readiness: {},
   active: localStorage.getItem("stage") || "start",
@@ -161,6 +164,12 @@ function hideRecent(menu) {
 
 export function applyProject(project, { keepMedia = false, keepStage = false } = {}) {
   state.project = project;
+  // The projection travels with the project, so a tab that did not load the source
+  // still knows what the footage is — Capture asks for previews of it too.
+  if (project && project.source_format) state.sourceFormat = project.source_format;
+  const viewKey = projectViewKey(project);
+  const rememberedView = viewKey ? localStorage.getItem(viewKey) : null;
+  if (rememberedView) state.sourceView = rememberedView;
   topbar.setProject(project);
   for (const stage of Object.values(stages)) {
     if (stage.applyProject) stage.applyProject(project, { keepMedia });
@@ -268,6 +277,24 @@ function projectStageKey(project) {
   return project && project.root ? `stage:${project.root}` : null;
 }
 
+function projectViewKey(project) {
+  return project && project.root ? `view:${project.root}` : null;
+}
+
+/**
+ * Which picture the rig is being placed on: the panorama, or the lenses it was shot
+ * with. One choice for the whole app -- picking the lens view in Start and then being
+ * handed a panorama in Capture is the same capture described two different ways.
+ */
+export function setSourceView(view) {
+  state.sourceView = view === "lenses" ? "lenses" : "panorama";
+  const key = projectViewKey(state.project);
+  if (key) localStorage.setItem(key, state.sourceView);
+  for (const stage of Object.values(stages)) {
+    if (stage.applyView) stage.applyView(state.sourceView);
+  }
+}
+
 export function goTo(key) {
   state.active = key;
   localStorage.setItem("stage", key);
@@ -337,7 +364,7 @@ async function boot() {
       topbar.setSource(media, state.sourceFormat);
     },
     goTo, report, flash, pokeJobs,
-    applyProject, autosave, openProject, openRecent,
+    applyProject, autosave, openProject, openRecent, setSourceView,
   };
 
   stages.start = StartStage(context);

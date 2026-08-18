@@ -14,6 +14,7 @@ from pathlib import Path
 from . import dataset, sharp
 from .ffmpeg import FFmpegInfo, MediaInfo
 from .rig import Camera, Rig, native_size, output_size
+from .source import SourceFormat
 
 #: `brush` writes <out>/images/<clip>/<camera>/, which both Brush and COLMAP read and
 #: which lets <out>/masks/<clip>/<camera>/ mirror it exactly -- Brush requires nested
@@ -118,14 +119,23 @@ def frames_per_second(mode: str, value: float) -> float:
     return 1.0
 
 
-def camera_size(camera: Camera, rig: Rig, media: MediaInfo) -> tuple[int, int]:
+def camera_size(camera: Camera, rig: Rig, media: MediaInfo,
+                source: SourceFormat | None = None) -> tuple[int, int]:
     """Output size for one camera.
 
     With `output.auto` the size follows the source resolution and this camera's own
     field of view, so a 45-degree camera is not padded out to the same pixel count as
     a 90-degree one. Otherwise the rig's fixed width and height are used for all.
+
+    `source` states what projection those pixels are in: a dual-fisheye frame spends its
+    width on two lenses, so the equirect-equivalent width -- not the file's -- is what
+    describes its density.
     """
-    return output_size(rig.output, camera, media.width)
+    width = media.width
+    if source is not None and not source.is_equirect:
+        width = source.source_width_as_equirect(media.width, media.height,
+                                                getattr(media, "video_streams", 1))
+    return output_size(rig.output, camera, width)
 
 
 @dataclass(frozen=True)
@@ -184,6 +194,9 @@ class ExtractPlan:
     #: Populated when static occluders were resolved; carries per-camera coverage and
     #: the rendered masks that `sidecar` links beside the images.
     mask_plan: "object | None" = None
+    #: What projection the source is in. Cameras are cut straight out of it, so a
+    #: dual-fisheye file never needs an equirect written to disk first.
+    source: SourceFormat = field(default_factory=SourceFormat)
 
     @property
     def total_cameras(self) -> int:
@@ -201,7 +214,8 @@ class ExtractPlan:
 def build_filter_graph(cameras: list[Camera], rig: Rig, prefix: str,
                        sizes: list[tuple[int, int]] | None = None,
                        burn: bool = False,
-                       source_size: tuple[int, int] | None = None) -> tuple[str, list[str]]:
+                       source_size: tuple[int, int] | None = None,
+                       source: SourceFormat | None = None) -> tuple[str, list[str]]:
     """Build the filter_complex string and the output label for each camera.
 
     Shape::
@@ -213,9 +227,39 @@ def build_filter_graph(cameras: list[Camera], rig: Rig, prefix: str,
 
     Cameras arrive here already normalized -- yaw wrapped into [-180, 180] and rig
     orientation folded in. Passing an unwrapped 240 makes ffmpeg abort.
+
+    A non-equirect `source` (dual fisheye) is read directly by each camera's own v360,
+    so there is one resample rather than two. The exception is the `burn` mode, whose
+    occluder mask is an equirect image: there the panorama is normalized once before the
+    blend, and the cameras then cut out of that.
     """
     if not cameras:
         raise ValueError("cannot build a filter graph with no cameras")
+
+    source = source or SourceFormat()
+    input_name, input_options = source.input_spec()
+    ingest: list[str] = []
+    if source.needs_graph:
+        # Lenses in separate streams, or mounted at an angle: they have to be stacked
+        # and turned upright before anything can read them as a panorama, so this path
+        # normalizes to equirect first and the cameras cut out of that.
+        if not source_size:
+            raise ValueError("a source whose lenses need rearranging must be given "
+                             "source_size, the equirect size to assemble at")
+        ingest = source.ingest_chains(source_size, interp=rig.output.interp,
+                                      label="src", thin=prefix)
+        prefix = ""
+        input_name, input_options = "e", []
+    elif burn and not source.is_equirect:
+        # The mask is equirect, so the picture has to be too before they can be
+        # multiplied -- and at exactly `source_size`, which is what the mask is scaled
+        # to a line later. blend refuses a mismatch.
+        if not source_size:
+            raise ValueError("burning an occluder onto a non-equirect source needs "
+                             "source_size, the equirect size to blend at")
+        convert = source.to_equirect(0, 0, interp=rig.output.interp, size=source_size)
+        prefix = f"{prefix},{convert}" if prefix else convert
+        input_name, input_options = "e", []
 
     out = rig.output
     count = len(cameras)
@@ -229,13 +273,16 @@ def build_filter_graph(cameras: list[Camera], rig: Rig, prefix: str,
     if grade:
         prefix = f"{prefix},{grade}" if prefix else grade
 
-    source = "[0:v]"
+    # The label every camera reads from: the input itself, the assembled panorama, or
+    # the burned one.
+    chains.extend(ingest)
+    stream = "[src]" if ingest else "[0:v]"
     if burn:
         # Multiply the panorama by the occluder mask once, before the split: cheaper
         # than blacking out every tile afterwards, and the cameras cannot disagree
         # about where the occluder was. Done in RGB -- multiplying in YUV would scale
         # the chroma planes towards 128 and tint the whole image.
-        chains.append(f"[0:v]{prefix + ',' if prefix else ''}format=gbrp[bsrc]")
+        chains.append(f"{stream}{prefix + ',' if prefix else ''}format=gbrp[bsrc]")
         # blend refuses mismatched sizes, so the mask is forced to the source's own
         # dimensions rather than assumed to be exactly 2:1.
         scale = f"scale={source_size[0]}:{source_size[1]}," if source_size else ""
@@ -243,22 +290,22 @@ def build_filter_graph(cameras: list[Camera], rig: Rig, prefix: str,
         # shortest=1 is load-bearing: the mask is fed with -loop 1 and never ends on
         # its own, so without it the blend runs forever and the extraction hangs.
         chains.append("[bsrc][bmask]blend=all_mode=multiply:shortest=1[burned]")
-        source, prefix = "[burned]", ""
+        stream, prefix = "[burned]", ""
 
     if count == 1:
-        head = f"{source}{prefix}," if prefix else source
+        head = f"{stream}{prefix}," if prefix else stream
         source_labels = [head]
     else:
         split_labels = "".join(f"[s{i}]" for i in range(count))
-        head = f"{source}{prefix},split={count}{split_labels}" if prefix \
-            else f"{source}split={count}{split_labels}"
+        head = f"{stream}{prefix},split={count}{split_labels}" if prefix \
+            else f"{stream}split={count}{split_labels}"
         chains.append(head)
         source_labels = [f"[s{i}]" for i in range(count)]
 
     for index, camera in enumerate(cameras):
         width, height = sizes[index] if sizes else (out.width, out.height)
         params = ":".join([
-            "e", "rectilinear",
+            input_name, "rectilinear", *input_options,
             f"yaw={camera.yaw:g}",
             f"pitch={camera.pitch:g}",
             f"roll={camera.roll:g}",
@@ -308,7 +355,11 @@ def build_pass_argv(
         single_pass.cameras, rig, selection.filter_prefix(plan.media),
         sizes=[(job.width, job.height) for job in single_pass.jobs],
         burn=burn,
-        source_size=(plan.media.width, plan.media.height) if burn else None,
+        # The assembled panorama's size: needed by the burn blend, and by any source
+        # whose lenses have to be stacked before they are a panorama at all.
+        source_size=(plan.source.equirect_size_for(plan.media)
+                     if burn or plan.source.needs_graph else None),
+        source=plan.source,
     )
     if graph_path is not None and len(graph) > GRAPH_INLINE_LIMIT:
         graph_path.parent.mkdir(parents=True, exist_ok=True)
@@ -342,6 +393,7 @@ def plan_extraction(
     ffmpeg: FFmpegInfo | None = None,
     on_analysis: "callable | None" = None,
     mask_mode: str = "sidecar",
+    source_format: SourceFormat | None = None,
 ) -> ExtractPlan:
     """Work out the passes needed to extract `media` with `rig`.
 
@@ -350,6 +402,8 @@ def plan_extraction(
     """
     selection.validate()
     rig.validate()
+    source_format = source_format or SourceFormat()
+    source_format.validate()
     if max_streams < 1:
         raise ValueError(f"--max-streams must be at least 1, got {max_streams}")
 
@@ -369,14 +423,26 @@ def plan_extraction(
 
     # Static occluders are resolved before any frame is extracted, so `skip` can drop
     # a camera before it costs anything and `burn` can join the filter graph.
+    # Trimming the lenses is an occluder like any other, but it belongs to the source
+    # rather than the rig -- so it joins the list here rather than being written into
+    # the rig the user edits.
+    mask_rig = rig
+    if source_format.seam_band > 0:
+        mask_rig = replace(rig, occluders=[*rig.occluders,
+                                           {"type": "seam_band",
+                                            "angle": source_format.seam_band}])
+
     mask_plan = None
-    if ffmpeg is not None and mask_mode != "none" and rig.occluders:
+    if ffmpeg is not None and mask_mode != "none" and mask_rig.occluders:
         from .mask import apply as mask_apply
-        sizes_by_name = {c.name: camera_size(c, rig, media) for c in rig.normalized_cameras()}
+        sizes_by_name = {c.name: camera_size(c, rig, media, source_format)
+                         for c in rig.normalized_cameras()}
+        # The occluder mask is equirect whatever the footage is, so it is built at the
+        # equirect size the source's own pixel density earns.
+        mask_width, mask_height = source_format.equirect_size_for(media)             if media.width else (4096, 2048)
         mask_plan = mask_apply.prepare(
-            ffmpeg, rig, sizes_by_name, root / ".threesixty" / "masks",
-            mode=mask_mode, source_width=media.width or 4096,
-            source_height=media.height or 0,
+            ffmpeg, mask_rig, sizes_by_name, root / ".threesixty" / "masks",
+            mode=mask_mode, source_width=mask_width, source_height=mask_height,
         )
 
     jobs: list[CameraJob] = []
@@ -399,7 +465,7 @@ def plan_extraction(
         # every camera in one directory, where names have to stay distinct instead.
         pattern = f"%0{digits}d.{extension}" if layout == "brush" \
             else f"{clip}_{camera.name}_%0{digits}d.{extension}"
-        width, height = camera_size(camera, rig, media)
+        width, height = camera_size(camera, rig, media, source_format)
         mask_directory = dataset.mask_dir(root, clip, camera.name)
         job = CameraJob(camera=camera, directory=directory, pattern=pattern,
                         width=width, height=height, mask_directory=mask_directory,
@@ -425,4 +491,5 @@ def plan_extraction(
         burn_mask=(mask_plan.equirect_mask
                    if mask_plan and mask_plan.mode == "burn" else None),
         mask_plan=mask_plan,
+        source=source_format,
     )

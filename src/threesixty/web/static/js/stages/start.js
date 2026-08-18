@@ -57,6 +57,47 @@ export function StartStage(ctx) {
   const source = InspectorSection("Source", { id: "start-source" });
   const pathField = el("input", { type: "text", readonly: true, placeholder: "no source loaded" });
   const mediaInfo = el("p", { class: "hint" });
+  // Cameras write two files: the stitched 360, and the raw one straight off both lenses.
+  // The raw file has been resampled by nothing, so it is the better source -- as long as
+  // we are told that is what it is, because it is 2:1 like a panorama and looks like one.
+  const projection = el("select", { id: "start-projection" },
+    ...[["equirect", "equirectangular (stitched 360)"],
+        ["dfisheye", "dual fisheye (raw, both lenses)"],
+        ["fisheye", "fisheye (one lens)"]]
+      .map(([value, label]) => el("option", { value }, label)));
+  const lensFov = el("input", { id: "start-lens-fov", type: "number", value: 190,
+                               min: 1, max: 360, step: 1 });
+  // The spec sheet rounds the lens figure and the difference shows up as a jump across
+  // the stitch line, so it can be measured instead of guessed.
+  const fitBtn = el("button", { id: "start-fit-fov", class: "btn", type: "button",
+                                onclick: fitLensFov, title: "Measure it from the stitch",
+                                html: "<span>Fit</span>" });
+  const lensField = el("div", { class: "field" },
+    el("label", {}, "lens FOV°"), lensFov, fitBtn);
+  // Where the lenses are. A camera that gives each lens its own video stream (the
+  // QooCam 8K) looks like an ordinary square video until you ask for the second track.
+  const lensLayout = el("select", { id: "start-lens-layout" },
+    ...[["sbs", "side by side in one frame"], ["streams", "one video stream per lens"]]
+      .map(([value, label]) => el("option", { value }, label)));
+  const layoutField = field("lenses", lensLayout);
+  // Sensors are mounted however the body needed them; opposed is the common case.
+  const lensRotate = el("select", { id: "start-lens-rotate" },
+    ...[["0,0", "upright"], ["90,-90", "90° opposed (QooCam 8K)"],
+        ["-90,90", "90° opposed, other way"], ["90,90", "90° both"],
+        ["180,180", "180° both"]]
+      .map(([value, label]) => el("option", { value }, label)));
+  const rotateField = field("rotation", lensRotate);
+  // The circular trim: v360 hands one lens over to the other at exactly 90°, which is
+  // the softest, worst-stitched part of a fisheye. This cuts that rim out of training.
+  const lensTrim = el("input", { id: "start-lens-trim", type: "number", value: 0,
+                                 min: 0, max: 45, step: 1 });
+  const trimField = field("trim edges°", lensTrim);
+  const trimHint = el("p", { class: "hint" });
+  // Which picture to show: the lenses as shot, or the panorama they project to.
+  const sourceView = el("select", { id: "start-view" },
+    ...[["lenses", "the lenses, side by side"], ["panorama", "the panorama they make"]]
+      .map(([value, label]) => el("option", { value }, label)));
+  const viewField = field("show", sourceView);
   source.body.append(
     el("div", { class: "field field--stack" }, pathField),
     el("div", { class: "field" },
@@ -64,14 +105,27 @@ export function StartStage(ctx) {
                      html: `${icon("folder", { size: 14 })}<span>Browse…</span>` }),
       el("button", { class: "btn", type: "button", onclick: () => ctx.openProject(),
                      html: `${icon("layers", { size: 14 })}<span>Open project…</span>` })),
+    field("projection", projection), layoutField, rotateField, lensField,
+    trimField, trimHint, viewField,
     mediaInfo);
+  for (const control of [projection, lensLayout, lensRotate, lensFov, lensTrim]) {
+    control.addEventListener("change", () => {
+      syncProjection(); updateMediaInfo(); ctx.autosave(); refreshPreview();
+    });
+  }
+  // Start's choice is the app's choice: Capture places the rig on the same picture.
+  sourceView.addEventListener("change", () => {
+    ctx.setSourceView(sourceView.value);
+    refreshPreview();
+  });
 
   const framesSection = InspectorSection("Frames", { id: "start-frames" });
-  const frameMode = el("select", {},
+  const frameMode = el("select", { id: "start-frame-mode" },
     ...[["sharp", "sharpest frame every N seconds"], ["fps", "every N per second"],
         ["every", "every Nth frame"], ["all", "all frames"]]
       .map(([value, label]) => el("option", { value }, label)));
-  const frameValue = el("input", { type: "number", value: 0.5, step: 0.1, min: 0.05 });
+  const frameValue = el("input", { id: "start-frame-value", type: "number", value: 0.5,
+                                   step: 0.1, min: 0.05 });
   const estimate = el("p", { class: "hint" });
   // The unit changes with the mode: `sharp` states a window in seconds, `fps` a rate.
   const frameValueLabel = el("label", {}, "seconds");
@@ -170,6 +224,68 @@ export function StartStage(ctx) {
     return el("div", { class: "field" }, el("label", {}, label), control);
   }
 
+  function readSourceFormat() {
+    const raw = projection.value !== "equirect";
+    return {
+      projection: projection.value || "equirect",
+      lens_fov: parseFloat(lensFov.value) || 190,
+      layout: projection.value === "dfisheye" ? lensLayout.value : "single",
+      rotate: raw ? lensRotate.value.split(",").map(Number) : [],
+      trim: raw ? (parseFloat(lensTrim.value) || 0) : 0,
+    };
+  }
+
+  function writeSourceFormat(format) {
+    projection.value = format.projection || "equirect";
+    if (format.lens_fov) lensFov.value = format.lens_fov;
+    if (format.layout && format.layout !== "single") lensLayout.value = format.layout;
+    const rotate = format.rotate && format.rotate.length
+      ? format.rotate.map((r) => String(Math.round(r))).join(",") : "0,0";
+    lensRotate.value = [...lensRotate.options].some((o) => o.value === rotate)
+      ? rotate : "0,0";
+    lensTrim.value = format.trim || 0;
+    syncProjection();
+  }
+
+  //: What the projection was last time, so a *change* can move the view with it
+  //: without overriding a choice the user made afterwards.
+  let lastProjection = null;
+
+  function syncProjection() {
+    const raw = projection.value !== "equirect";
+    if (lastProjection !== null && lastProjection !== projection.value) {
+      // Declaring raw footage means you want to look at it; going back to a stitched
+      // panorama leaves nothing else to look at.
+      ctx.setSourceView(raw ? "lenses" : "panorama");
+    } else if (!raw && ctx.state.sourceView === "lenses") {
+      ctx.setSourceView("panorama");
+    }
+    lastProjection = projection.value;
+    lensField.hidden = !raw;
+    rotateField.hidden = !raw;
+    trimField.hidden = !raw;
+    viewField.hidden = !raw;
+    layoutField.hidden = projection.value !== "dfisheye";
+    trimHint.hidden = !raw || !(parseFloat(lensTrim.value) > 0);
+    const trim = parseFloat(lensTrim.value) || 0;
+    trimHint.textContent = trim > 0
+      ? `Ignores a ${trim}° band either side of the stitch line — and, because that `
+        + "line runs through both poles, the sky straight up and the ground straight "
+        + "down with it."
+      : "";
+  }
+
+  // What the panorama will come out as. Mirrors source.py: two lenses share the width,
+  // one spends all of it, and the result is rounded to a size an encoder will take.
+  function equirectSize(media, format) {
+    if (!media || format.projection === "equirect") return null;
+    const merged = format.layout === "streams" && media.video_streams > 1
+      ? media.width * 2 : media.width;
+    const lens = format.projection === "dfisheye" ? merged / 2 : merged;
+    const width = Math.round(360 * (lens / (format.lens_fov || 190)) / 4) * 4;
+    return [width, width / 2];
+  }
+
   function updateEstimate() {
     const media = local.media;
     if (!media) { estimate.textContent = ""; return; }
@@ -188,11 +304,46 @@ export function StartStage(ctx) {
   function updateMediaInfo() {
     const media = local.media;
     if (!media) { mediaInfo.textContent = ""; return; }
+    const format = readSourceFormat();
     const bits = [`${media.width}×${media.height}`];
+    if (media.video_streams > 1) bits.push(`${media.video_streams} video streams`);
     if (media.is_video) bits.push(`${media.duration.toFixed(1)}s`, `${media.fps} fps`);
     else bits.push("still");
-    if (!media.looks_equirectangular) bits.push("not 2:1 — geometry will be wrong");
+    const equirect = equirectSize(media, format);
+    if (equirect) bits.push(`→ ${equirect[0]}×${equirect[1]} equirectangular`);
+    // Only meaningful for a source claiming to be a panorama already: a raw two-lens
+    // file is 2:1 as well, and that says nothing about whether it is right.
+    else if (!media.looks_equirectangular) bits.push("not 2:1 — geometry will be wrong");
     mediaInfo.textContent = bits.join("  ·  ");
+    // The top bar carries the same warning, so it needs to know what this file is too.
+    ctx.setSource(media, format);
+  }
+
+  async function fitLensFov() {
+    if (!local.media) { ctx.flash("Load a source first.", { level: "warn" }); return; }
+    if (projection.value !== "dfisheye") {
+      ctx.flash("Fitting compares the two lenses, so it needs a dual-fisheye source.",
+                { level: "warn" });
+      return;
+    }
+    fitBtn.disabled = true;
+    fitBtn.querySelector("span").textContent = "Measuring…";
+    try {
+      const result = await ctx.api.post("/api/source/fit",
+        { path: local.media.path, source_format: readSourceFormat() });
+      lensFov.value = result.lens_fov;
+      const rotate = (result.rotate || []).map((r) => String(Math.round(r))).join(",");
+      const known = [...lensRotate.options].some((o) => o.value === rotate);
+      if (known) lensRotate.value = rotate;
+      updateMediaInfo(); ctx.autosave(); refreshPreview();
+      ctx.flash(`Lenses line up best at ${result.lens_fov}°`
+        + (known && rotate !== "0,0" ? `, mounted ${rotate}°.` : ".")
+        + " Check the panorama view — a mounting turned over stitches just as well.");
+    } catch (error) { ctx.report(error); }
+    finally {
+      fitBtn.disabled = false;
+      fitBtn.querySelector("span").textContent = "Fit";
+    }
   }
 
   async function browse() {
@@ -209,9 +360,25 @@ export function StartStage(ctx) {
     const path = pathField.value.trim();
     if (!path) return;
     try {
-      const data = await ctx.api.post("/api/preview", { path, time: 0 });
+      let data = await ctx.api.post("/api/preview",
+        { path, time: 0, source_format: readSourceFormat(), view: sourceView.value });
+
+      // A file the container gives away -- two video streams is a lens each -- is set
+      // up for the user rather than left to be discovered by a wrong-looking panorama.
+      const suggested = data.media && data.media.suggested_source;
+      if (suggested && projection.value === "equirect") {
+        writeSourceFormat(suggested);
+        // Raw footage is shown as it was shot, here and in Capture.
+        ctx.setSourceView("lenses");
+        ctx.flash(`Looks like ${suggested.projection === "dfisheye"
+          ? "a raw two-lens file" : "a fisheye file"} — set the source to match. `
+          + "The lens figures are a guess: press Fit to measure them, and check "
+          + "the panorama view before processing.", { level: "info" });
+        data = await ctx.api.post("/api/preview",
+          { path, time: 0, source_format: readSourceFormat(), view: sourceView.value });
+      }
       local.media = data.media;
-      ctx.setSource(data.media);
+      ctx.setSource(data.media, readSourceFormat());
       updateMediaInfo(); updateEstimate();
 
       // Show the panorama in the middle with a scrubber; hide the drop target.
@@ -227,6 +394,7 @@ export function StartStage(ctx) {
       const { project } = await ctx.api.post("/api/project/for-source", {
         path: data.media.path,
         frames: { mode: frameMode.value, value: parseFloat(frameValue.value) || 2 },
+        source_format: readSourceFormat(),
       });
       ctx.applyProject(project, { keepMedia: true, keepStage: true });
       refreshPreview();
@@ -269,6 +437,7 @@ export function StartStage(ctx) {
     try {
       await ctx.api.post("/api/frames/extract", {
         mode: frameMode.value, value: parseFloat(frameValue.value) || 2,
+        source_format: readSourceFormat(),
       });
       processing = true;
       ctx.pokeJobs();
@@ -320,7 +489,7 @@ export function StartStage(ctx) {
   async function createSegments() {
     if (!local.media) { ctx.flash("Load a source first.", { level: "warn" }); return; }
     const mode = segMode.value;
-    const payload = { path: local.media.path };
+    const payload = { path: local.media.path, source_format: readSourceFormat() };
     if (mode === "duration") {
       payload.mode = "duration"; payload.seconds = parseFloat(segSeconds.value) || 60;
     } else if (mode === "motion-distance") {
@@ -387,7 +556,8 @@ export function StartStage(ctx) {
       if (!local.media) return;
       try {
         const { url } = await ctx.api.post("/api/preview",
-          { path: local.media.path, time: parseFloat(previewTime.value) || 0 });
+          { path: local.media.path, time: parseFloat(previewTime.value) || 0,
+            source_format: readSourceFormat(), view: sourceView.value });
         previewImg.src = url;
       } catch { /* keep the frame that is showing */ }
     }, 250);
@@ -401,7 +571,8 @@ export function StartStage(ctx) {
     try {
       const { url } = await ctx.api.post("/api/mask/preview", {
         path: local.media.path, time: parseFloat(previewTime.value) || 0,
-        objects: true, detect: readMasking(),
+        objects: true, detect: readMasking(), source_format: readSourceFormat(),
+        view: sourceView.value,
       });
       previewImg.src = url;
     } catch (error) { ctx.report(error); }
@@ -413,6 +584,7 @@ export function StartStage(ctx) {
 
   updateSegFields();
   syncFrameUnit();
+  syncProjection();
 
   return {
     panel,
@@ -420,6 +592,7 @@ export function StartStage(ctx) {
       const payload = {
         detect: readMasking(),
         frames: { mode: frameMode.value, value: parseFloat(frameValue.value) || 2 },
+        source_format: readSourceFormat(),
       };
       if (local.media) payload.sources = [local.media.path];
       return payload;
@@ -437,11 +610,17 @@ export function StartStage(ctx) {
       }
       lastState = importing ? importing.state : null;
     },
+    applyView(view) {
+      sourceView.value = view;
+    },
     applyProject(project) {
       if (!project) return;
       frameMode.value = project.frames.mode;
       frameValue.value = project.frames.value;
       syncFrameUnit();
+      writeSourceFormat(project.source_format || {});
+      sourceView.value = ctx.state.sourceView || "lenses";
+      updateMediaInfo();
       writeMasking(project.detect);
       updateEstimate();
       if (project.sources && project.sources.length) pathField.value = project.sources[0];

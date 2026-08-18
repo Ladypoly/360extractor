@@ -129,3 +129,119 @@ export function probeEdges(camera, orientation = ZERO) {
   }
   return out;
 }
+
+// ── views: where a direction lands in the picture on screen ──────────────
+//
+// Two pictures carry the same sphere. The panorama maps bearing to x and elevation
+// to y. A raw dual-fisheye frame maps each hemisphere onto a circle, and it is worth
+// drawing the rig on *that* when that is what the camera shot: the stitch line is
+// visible in it, and a camera placed across the seam is a camera whose images will be
+// worst. Both views expose the same three operations, so the editor draws, hit-tests
+// and drags through whichever it is showing.
+//
+// The dual-fisheye numbers are not a guess. `v360=e:dfisheye` was run over markers at
+// known bearings and the landing pixels read back (tests/test_overlay_geometry.py keeps
+// doing it): the FRONT hemisphere is the right-hand circle, the back is the left-hand
+// one and mirrored in x, the radius is linear in the angle from the lens axis
+// (equidistant), and the full half-width is the lens's own field of view.
+
+export const equirectView = {
+  kind: "panorama",
+  wraps: true,
+  project(yaw, pitch, width, height) {
+    return { x: (yaw + 180) / 360 * width, y: (90 - pitch) / 180 * height, lens: 0 };
+  },
+  unproject(x, y, width, height) {
+    return { yaw: x / width * 360 - 180, pitch: 90 - y / height * 180 };
+  },
+};
+
+/** The two-circle view of a dual-fisheye source, `lensFov` degrees per lens. */
+export function dualFisheyeView(lensFov = 190) {
+  const half = Math.max(lensFov, 1) / 2 * RAD;
+  return {
+    kind: "lenses",
+    wraps: false,
+    lensFov,
+
+    project(yaw, pitch, width, height) {
+      const [dx, dy, dz] = dirFrom(yaw, pitch);
+      const front = dz >= 0;
+      const theta = Math.acos(Math.max(-1, Math.min(1, front ? dz : -dz)));
+      const span = Math.hypot(dx, dy) || 1e-9;
+      const ux = dx / span, uy = dy / span;
+      const rx = theta / half * (width / 4);
+      const ry = theta / half * (height / 2);
+      // Front on the right, back on the left and mirrored in x -- measured, not assumed.
+      const cx = front ? 3 * width / 4 : width / 4;
+      return { x: cx + (front ? rx * ux : -rx * ux), y: height / 2 - ry * uy,
+               lens: front ? 1 : 0 };
+    },
+
+    unproject(x, y, width, height) {
+      const front = x >= width / 2;
+      const cx = front ? 3 * width / 4 : width / 4;
+      const dx = (front ? x - cx : cx - x) / (width / 4);
+      const dy = (height / 2 - y) / (height / 2);
+      const r = Math.hypot(dx, dy);
+      const theta = Math.min(r, 1.4) * half;
+      const span = r || 1e-9;
+      const st = Math.sin(theta), ct = Math.cos(theta);
+      // `dx` already carries the back lens's mirror, so the direction needs no
+      // second flip -- applying one sent every bearing behind the rig to its opposite.
+      return angleOf([st * dx / span, st * dy / span, front ? ct : -ct]);
+    },
+
+    /** Circle centre and radii for one lens, for drawing the frame of the picture. */
+    circle(lens, width, height) {
+      return { x: lens ? 3 * width / 4 : width / 4, y: height / 2,
+               rx: width / 4, ry: height / 2 };
+    },
+  };
+}
+
+/**
+ * Footprint outline as one or more paths, in the pixel space of `view`.
+ *
+ * The panorama needs the seam unwrapped so its single polygon stays continuous. The
+ * lens view instead *splits*: a camera looking across the stitch is genuinely two
+ * shapes, one on each circle, and joining them would draw a line straight through the
+ * middle of a picture where no such edge exists.
+ */
+export function footprintPaths(camera, orientation, view, width, height, steps = 24) {
+  const basis = basisOf(camera, orientation);
+  const edge = [];
+  for (let i = 0; i < steps; i++) edge.push([-1 + 2*i/steps, -1]);
+  for (let i = 0; i < steps; i++) edge.push([1, -1 + 2*i/steps]);
+  for (let i = 0; i < steps; i++) edge.push([1 - 2*i/steps, 1]);
+  for (let i = 0; i < steps; i++) edge.push([-1, 1 - 2*i/steps]);
+
+  const projected = edge.map(([nx, ny]) => {
+    const a = angleOf(rayThrough(camera, basis, nx, ny));
+    return view.project(a.yaw, a.pitch, width, height);
+  });
+
+  if (view.wraps) {
+    const points = projected.map((p) => ({ x: p.x, y: p.y }));
+    for (let i = 1; i < points.length; i++) {
+      while (points[i].x - points[i-1].x > width / 2) points[i].x -= width;
+      while (points[i].x - points[i-1].x < -width / 2) points[i].x += width;
+    }
+    return [points];
+  }
+
+  // Walk the closed outline and cut it wherever it changes lens.
+  const paths = [];
+  let run = [];
+  for (let i = 0; i < projected.length + 1; i++) {
+    const point = projected[i % projected.length];
+    const previous = run.length ? projected[(i - 1) % projected.length] : null;
+    if (previous && point.lens !== previous.lens) {
+      if (run.length > 1) paths.push(run);
+      run = [];
+    }
+    run.push({ x: point.x, y: point.y });
+  }
+  if (run.length > 1) paths.push(run);
+  return paths;
+}

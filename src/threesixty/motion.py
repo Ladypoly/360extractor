@@ -19,6 +19,7 @@ import subprocess
 from pathlib import Path
 
 from .ffmpeg import FFmpegError
+from .source import SourceFormat
 
 
 def available() -> bool:
@@ -31,7 +32,8 @@ def available() -> bool:
 
 
 def forward_motion(ffmpeg, source: str | Path, sample_fps: float = 2.0,
-                   width: int = 320, on_progress=None, should_cancel=None
+                   width: int = 320, on_progress=None, should_cancel=None,
+                   source_format: SourceFormat | None = None
                    ) -> list[tuple[float, float]]:
     """Per-interval forward-motion magnitude, as `(time_seconds, magnitude)`.
 
@@ -40,6 +42,10 @@ def forward_motion(ffmpeg, source: str | Path, sample_fps: float = 2.0,
     over the equatorial band (the poles are ignored -- equirect distortion there is all
     projection, not motion). The first sample is `(0.0, 0.0)`: there is nothing before it
     to compare against.
+
+    A raw dual-fisheye source is projected to equirect first: the band being measured is
+    defined in panorama coordinates, and on two circles it would be measuring the wrong
+    part of the sphere.
     """
     import cv2
     import numpy as np
@@ -49,8 +55,10 @@ def forward_motion(ffmpeg, source: str | Path, sample_fps: float = 2.0,
 
     height = width // 2
     frame_bytes = width * height
+    fmt = source_format or SourceFormat()
+    resize = fmt.to_equirect(0, 0, size=(width, height)) or f"scale={width}:{height}"
     argv = [str(ffmpeg.path), "-hide_banner", "-loglevel", "error", "-i", str(source),
-            "-vf", f"fps={sample_fps},scale={width}:{height},format=gray",
+            "-vf", f"fps={sample_fps},{resize},format=gray",
             "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1"]
     process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 

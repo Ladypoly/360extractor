@@ -54,6 +54,7 @@ from .. import (
     userpresets,
 )
 from ..rig import PRESETS, Camera, Grade, Orientation, Output, Rig, RigError
+from ..source import PROJECTIONS, SourceFormat
 
 #: Occluder kinds a global rig preset may carry. `nadir_cone`/`zenith_cone` are angles
 #: and travel between projects; `equirect_mask` (a painted file) and `ml` are tied to one
@@ -107,6 +108,9 @@ class Session:
         #: is what makes the grade sliders usable live.
         self.preview_source: Path | None = None
         self.preview_key: tuple | None = None
+        #: (path, time, SourceFormat) of whatever produced `preview_source`, so a
+        #: measurement can go back to the panorama even when the lenses are on screen.
+        self.preview_origin: tuple | None = None
         #: Detection backends, kept alive between requests. Constructing one loads the
         #: model weights, which is several seconds -- doing that per preview is what made
         #: scrubbing with the mask overlay unusable.
@@ -139,6 +143,12 @@ def media_payload(info: MediaInfo) -> dict:
     payload["path"] = str(info.path)
     payload["aspect"] = info.aspect
     payload["looks_equirectangular"] = info.looks_equirectangular
+    payload["looks_circular"] = info.looks_circular
+    # What the file looks like it is, when the container makes that plain -- two video
+    # streams is a lens each, and no stitched 360 file is ever shaped that way. Offered,
+    # never applied: the user confirms it in Start.
+    suggestion = SourceFormat.detect(info)
+    payload["suggested_source"] = suggestion.to_dict() if suggestion else None
     return payload
 
 
@@ -199,12 +209,18 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._file(target, _static_type(target.name) or "application/octet-stream")
 
-    def _serve_project_frame(self, relative: str, width: int = 0) -> None:
-        """Serve an extracted equirect frame so the Capture canvas can show it.
+    def _serve_project_frame(self, relative: str, width: int = 0,
+                             view: str = "panorama") -> None:
+        """Serve an extracted frame so the Capture canvas can show it.
 
         `?w=` returns a cached copy at that width. Frames come off an 8K source, and
         shipping (and decoding) all of those pixels for a canvas a fraction of the size
         is most of what made stepping through them feel slow.
+
+        `?view=lenses` sends the frame back through the projection it arrived in, so a
+        capture shot on two fisheye lenses can be rigged in the picture it was shot in.
+        The frames on disk stay equirect either way -- that is what the rest of the
+        pipeline reads, and what the tiles are cut from.
 
         Only the filename is used, so `/frames/00001.jpg` and the older
         `/frames/<clip>/00001.jpg` both land on whichever layout the project has.
@@ -220,15 +236,52 @@ class Handler(BaseHTTPRequestHandler):
         if target is None or not target.exists():
             self._json({"error": f"not found: {relative}"}, 404)
             return
-        if width:
-            width = max(min(width, 8192), 64)
+        fmt = project.source_format
+        lenses = view == "lenses" and not fmt.is_equirect
+        if width or lenses:
+            width = max(min(width or 1600, 8192), 64)
             proxy = self._derived(
-                f"frame|{target}|{target.stat().st_mtime_ns}|{width}", ".jpg")
+                f"frame|{target}|{target.stat().st_mtime_ns}|{width}|{view}", ".jpg")
             try:
-                target = self._scaled(target, width, width // 2, proxy)
+                target = (self._as_lenses(target, fmt, width, proxy) if lenses
+                          else self._scaled(target, width, width // 2, proxy))
             except FFmpegError:
                 pass                        # fall back to the original, whole
         self._file(target, "image/jpeg")
+
+    def _as_lenses(self, equirect: Path, fmt: SourceFormat, width: int,
+                   target: Path, mask: bool = False) -> Path:
+        """Project an equirect image back onto the lenses it was shot with.
+
+        Same call as `_mask_as_lenses`, for pictures rather than masks: the frames on
+        disk are panoramas, and this is what the Capture canvas draws when the rig is
+        being placed on the raw view.
+        """
+        if target.exists():
+            return target
+        height = max(width // 2, 2)
+        params = ":".join(["e", "dfisheye" if fmt.lens_count == 2 else "fisheye",
+                           f"h_fov={fmt.lens_fov:g}", f"v_fov={fmt.lens_fov:g}",
+                           f"w={width}", f"h={height}",
+                           f"interp={'near' if mask else 'line'}"])
+        # Outside each circle there is no picture -- a real lens frame is black there.
+        # v360 fills those corners by smearing the rim instead, which reads as detail
+        # that does not exist, so they are cut back to black.
+        inside = ("lte(pow((X-if(lt(X,W/2),W/4,3*W/4))/(W/4),2)"
+                  "+pow((Y-H/2)/(H/2),2),1)")
+        # A mask keeps its surround *white*: outside the circles there is no picture to
+        # exclude, and tinting it red would drown the frame in a warning about nothing.
+        circles = (f"format=gray,geq=lum='if({inside},lum(X,Y),255)'" if mask else
+                   f"format=gbrp,geq=r='if({inside},r(X,Y),0)'"
+                   f":g='if({inside},g(X,Y),0)':b='if({inside},b(X,Y),0)'")
+        result = subprocess.run(
+            [str(self.session.ffmpeg.path), "-hide_banner", "-loglevel", "error", "-y",
+             "-i", str(equirect), "-vf", f"v360={params},{circles}",
+             "-frames:v", "1", "-q:v", "3", str(target)],
+            capture_output=True, text=True, errors="replace")
+        if result.returncode != 0 or not target.exists():
+            raise FFmpegError(f"lens projection failed: {result.stderr.strip()}")
+        return target
 
     def _serve_project_file(self, relative: str) -> None:
         """Serve a file from the open project, so the viewer can fetch a .ply."""
@@ -264,7 +317,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._serve_project_file(route.path[len("/splat/"):])
             elif route.path.startswith("/frames/"):
                 self._serve_project_frame(route.path[len("/frames/"):],
-                                          int(query.get("w", ["0"])[0] or 0))
+                                          int(query.get("w", ["0"])[0] or 0),
+                                          query.get("view", ["panorama"])[0])
             elif route.path.startswith("/preview/"):
                 # Before the generic static handler: these are generated files in the
                 # session cache, and `.jpg` would otherwise be looked for in static/.
@@ -323,6 +377,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.api_probe(payload))
             elif route.path == "/api/preview":
                 self._json(self.api_preview(payload))
+            elif route.path == "/api/source/fit":
+                self._json(self.api_source_fit(payload))
             elif route.path == "/api/camera-preview":
                 self._json(self.api_camera_preview(payload))
             elif route.path == "/api/rig/validate":
@@ -422,6 +478,7 @@ class Handler(BaseHTTPRequestHandler):
             "missing": [str(p) for p in project.missing_sources()],
             "rig": project.rig.to_dict(),
             "frames": asdict(project.frames),
+            "source_format": project.source_format.to_dict(),
             "output": asdict(project.output),
             "detect": asdict(project.detect),
             "stages": {name: project.status(name) for name in STAGES},
@@ -692,6 +749,22 @@ class Handler(BaseHTTPRequestHandler):
                     current = asdict(getattr(project, key))
                     current.update(payload[key])
                     setattr(project, key, target(**current))
+            if "source_format" in payload:
+                project.source_format = SourceFormat.from_dict(payload["source_format"])
+                project.source_format.validate()
+            else:
+                # Nobody said what the footage is -- so if the container makes it plain
+                # (two video streams of the same square size is a lens each), record
+                # that rather than defaulting to a panorama. A tab other than Start can
+                # open a source, and reading one lens as a whole sphere is not a
+                # recoverable mistake: it is silently wrong all the way to the splat.
+                try:
+                    probed = probe_media(source, self.session.ffmpeg)
+                except FFmpegError:
+                    probed = None       # unreadable here is the extraction's problem
+                detected = SourceFormat.detect(probed) if probed else None
+                if detected is not None:
+                    project.source_format = detected
             project.save()
 
         self.session.project = project
@@ -713,6 +786,7 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError(f"{source} does not exist")
         info = probe_media(source, self.session.ffmpeg)
         mode = payload.get("mode", "duration")
+        source_format = self._source_format(payload)
 
         if mode == "duration":
             segments = segment.segment_by_duration(info.duration, float(payload["seconds"]))
@@ -724,7 +798,8 @@ class Handler(BaseHTTPRequestHandler):
         elif mode == "motion":
             if not motion.available():
                 raise ValueError('motion segmentation needs OpenCV: pip install -e ".[ml]"')
-            samples = motion.forward_motion(self.session.ffmpeg, source)
+            samples = motion.forward_motion(self.session.ffmpeg, source,
+                                            source_format=source_format)
             if payload.get("speed_kph"):
                 segments = segment.segment_by_motion(
                     samples, meters=float(payload["meters"]),
@@ -743,6 +818,8 @@ class Handler(BaseHTTPRequestHandler):
                                      name=root.name, overwrite=True)
             project.frames.start = round(seg.start, 3)
             project.frames.end = round(seg.end, 3)
+            # Every segment reads the same file, so they all read it the same way.
+            project.source_format = source_format
             project.save()
             recent.record(project.root, project.name)
             created.append({
@@ -770,6 +847,9 @@ class Handler(BaseHTTPRequestHandler):
             project.rig = rig_from_payload(payload["rig"])
         if "sources" in payload:
             project.sources = [project.relative(s) for s in payload["sources"]]
+        if "source_format" in payload:
+            project.source_format = SourceFormat.from_dict(payload["source_format"])
+            project.source_format.validate()
         for key, target in (("frames", FrameSettings), ("output", OutputSettings),
                             ("detect", DetectSettings)):
             if key in payload:
@@ -824,7 +904,8 @@ class Handler(BaseHTTPRequestHandler):
         project = self.session.project
         frame_name = payload.get("frame")
         seek = None
-        if frame_name and project and project.resolved_sources():
+        extracted = bool(frame_name and project and project.resolved_sources())
+        if extracted:
             clip = safe_stem(project.resolved_sources()[0].stem)
             source_path = frames.frames_dir(project.root, clip) / frame_name
             if not source_path.exists():
@@ -834,19 +915,30 @@ class Handler(BaseHTTPRequestHandler):
             if probe_media(source_path, ffmpeg).is_video:
                 seek = float(payload.get("time", 0.0)) or None
 
-        frame = self.session.next_name(".jpg")
-        argv = [str(ffmpeg.path), "-hide_banner", "-loglevel", "error", "-y"]
-        if seek:
-            argv += ["-ss", f"{seek:g}"]
-        argv += ["-i", str(source_path), "-vf", f"scale={width}:{height}",
-                 "-frames:v", "1", "-q:v", "4", str(frame)]
-        result = subprocess.run(argv, capture_output=True, text=True, errors="replace")
-        if result.returncode != 0 or not frame.exists():
-            raise FFmpegError(f"preview failed: {result.stderr.strip()}")
+        # Extracted frames are equirect by construction; a raw source is whatever the
+        # user says it is, and is previewed in whichever view they are looking at.
+        fmt = SourceFormat() if extracted else self._source_format(payload)
+        view = "panorama" if extracted else self._preview_view(payload, fmt)
+        frame = self._decode_source_frame(source_path, seek, width, fmt, view,
+                                          self.session.next_name(".jpg"), quality=4)
 
-        mask = self._preview_mask(frame, width, height, payload)
+        # Masking is decided on the panorama whatever is on screen. That is where the
+        # pipeline itself detects, and it is the only place the two agree: a detector
+        # run on the lens view finds different things (a fisheye circle is not a
+        # photograph of anything it was trained on), and the occluders are equirect by
+        # construction, so mixing the two produced a mask that matched neither.
+        measured = frame if view == "panorama" else self._decode_source_frame(
+            source_path, seek, width, fmt, "panorama",
+            self.session.next_name(".jpg"), quality=4)
+
+        mask = self._preview_mask(measured, width, height, payload, source_format=fmt)
         if mask is None:
             return {"url": f"/preview/{frame.name}", "empty": True}
+        if view == "lenses":
+            # The mask is equirect; the picture under it is not. Send the mask back out
+            # through the same projection, so it lands on the lenses -- and the trimmed
+            # edge shows up as what it is, a ring cut off the rim of each circle.
+            mask = self._mask_as_lenses(mask, fmt, width, height)
 
         target = self.session.next_name(".jpg")
         opacity = float(payload.get("opacity", 0.5))
@@ -930,6 +1022,19 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError(f"no such frame: {name}")
         width = max(int(payload.get("width", 1280)), 64)
         height = width // 2
+        # The mask is measured on the panorama, as always, and only then follows the
+        # picture onto the lenses -- so the two always agree about what is excluded.
+        fmt = project.source_format
+        lenses = str(payload.get("view") or "") == "lenses" and not fmt.is_equirect
+
+        def answer(mask: Path, source: str) -> dict:
+            shown = mask
+            if lenses:
+                shown = self._as_lenses(
+                    mask, fmt, width,
+                    self._derived(f"lens|{mask}|{width}|{fmt.lens_fov:g}", ".png"),
+                    mask=True)
+            return {"url": f"/preview/{shown.name}", "source": source}
 
         generated = (project.root / ".threesixty" / "masks" / "equirect_masks"
                      / f"{Path(name).stem}.png")
@@ -937,14 +1042,14 @@ class Handler(BaseHTTPRequestHandler):
             target = self._derived(
                 f"gen|{generated}|{generated.stat().st_mtime_ns}|{width}", ".png")
             self._scaled(generated, width, height, target, sharp=True)
-            return {"url": f"/preview/{target.name}", "source": "generated"}
+            return answer(target, "generated")
 
         detect = payload.get("detect") or asdict(project.detect)
         signature = json.dumps({"detect": detect, "occluders": payload.get("occluders")},
                                sort_keys=True, default=str)
         target = self._derived(f"live|{frame_path}|{width}|{signature}", ".png")
         if target.exists():
-            return {"url": f"/preview/{target.name}", "source": "cached"}
+            return answer(target, "cached")
 
         scaled = self._derived(f"frame|{frame_path}|{width}", ".jpg")
         self._scaled(frame_path, width, height, scaled)
@@ -954,10 +1059,17 @@ class Handler(BaseHTTPRequestHandler):
                                   out=target)
         if mask is None:
             return {"url": None, "empty": True}
-        return {"url": f"/preview/{target.name}", "source": "detected"}
+        return answer(target, "detected")
+
+    def _mask_as_lenses(self, equirect_mask: Path, fmt: SourceFormat,
+                        width: int, height: int) -> Path:
+        """Project an equirect mask back onto the lens view, for the preview."""
+        return self._as_lenses(equirect_mask, fmt, width,
+                               self.session.next_name(".png"), mask=True)
 
     def _preview_mask(self, frame: Path, width: int, height: int,
-                      payload: dict, out: Path | None = None) -> Path | None:
+                      payload: dict, out: Path | None = None,
+                      source_format: SourceFormat | None = None) -> Path | None:
         """Build the combined equirect mask (cone/occluders + optional detection) as PNG.
 
         Returns None when nothing would be masked, so the caller shows the plain frame.
@@ -966,6 +1078,11 @@ class Handler(BaseHTTPRequestHandler):
         angle = payload.get("sky_cone_angle")
         if angle:
             raw.append({"type": "zenith_cone", "angle": float(angle)})
+        # Trimming the lenses is part of the picture the user is checking, so it belongs
+        # in the preview even though it comes from the source rather than the rig.
+        fmt = source_format or self._source_format(payload)
+        if fmt.seam_band > 0:
+            raw.append({"type": "seam_band", "angle": fmt.seam_band})
         occluders = [o for o in (geometric.Occluder.from_dict(d) for d in raw)
                      if o.kind != "ml"]
 
@@ -1006,6 +1123,12 @@ class Handler(BaseHTTPRequestHandler):
         rig = rig_from_payload(payload["rig"])
         width = int(payload.get("source_width") or 4096)
         height = int(payload.get("source_height") or width // 2)
+        # The mask is equirect whatever the file is. Measuring it on a raw source's own
+        # 1:1 frame would put every angle in the wrong place.
+        fmt = self._source_format(payload)
+        if not fmt.is_equirect:
+            width, height = fmt.equirect_size(
+                width, height, int(payload.get("source_streams") or 1))
 
         occluders = geometric.occluders_of(rig)
         if not occluders:
@@ -1048,6 +1171,89 @@ class Handler(BaseHTTPRequestHandler):
         )
         return {"paths": paths}
 
+    def _source_format(self, payload: dict | None = None) -> SourceFormat:
+        """What projection the source pixels are in.
+
+        The UI's current choice wins while a source is being set up (the project may not
+        exist yet, or may not have been saved since the dropdown moved); otherwise the
+        open project answers. Extracted frames are equirect by construction, so callers
+        working on those skip this entirely.
+        """
+        if payload and payload.get("source_format"):
+            chosen = SourceFormat.from_dict(payload["source_format"])
+            chosen.validate()
+            return chosen
+        project = self.session.project
+        return project.source_format if project else SourceFormat()
+
+    def _decode_source_frame(self, path: Path, seek: float | None, width: int,
+                             fmt: SourceFormat, view: str, target: Path,
+                             quality: int = 3) -> Path:
+        """One frame out of a source file, as either view, at `width`.
+
+        `view` is `panorama` (assembled and projected to equirectangular, what the
+        pipeline will actually work on) or `lenses` (each lens upright, side by side,
+        nothing warped -- what a raw file honestly looks like). Both come out 2:1, so
+        the canvas does not have to care which it is showing.
+        """
+        height = max(width // 2, 2)
+        argv = [str(self.session.ffmpeg.path), "-hide_banner", "-loglevel", "error", "-y"]
+        if seek:
+            argv += ["-ss", f"{seek:g}"]
+        argv += ["-i", str(path)]
+
+        if view == "lenses" and not fmt.is_equirect:
+            chains = fmt.lens_chains(label="out", scale=width // 2)
+            if chains:
+                argv += ["-filter_complex", ";".join(chains), "-map", "[out]"]
+            else:
+                # Both lenses already sit in one frame the right way up.
+                argv += ["-vf", f"scale={width}:{height}"]
+        elif fmt.needs_graph:
+            argv += ["-filter_complex",
+                     ";".join(fmt.ingest_chains((width, height), label="out")),
+                     "-map", "[out]"]
+        else:
+            argv += ["-vf", fmt.to_equirect(0, 0, size=(width, height))
+                     or f"scale={width}:-2"]
+
+        argv += ["-frames:v", "1", "-q:v", str(quality), str(target)]
+        result = subprocess.run(argv, capture_output=True, text=True, errors="replace")
+        if result.returncode != 0 or not target.exists():
+            raise FFmpegError(f"preview failed: {result.stderr.strip()}")
+        return target
+
+    def _preview_view(self, payload: dict, fmt: SourceFormat) -> str:
+        """Which of the two views to show.
+
+        The panorama unless the caller explicitly asks for the lenses. That default is
+        load-bearing: the panorama is the picture the whole pipeline works in, and every
+        other tab draws over it in equirect coordinates -- so a caller that says nothing
+        must not be handed two fisheye circles. Start asks for the lenses by name.
+        """
+        return "lenses" if str(payload.get("view") or "") == "lenses" else "panorama"
+
+    def api_source_fit(self, payload: dict) -> dict:
+        """Measure the lens field of view from how well the two lenses line up.
+
+        The spec sheet rounds it and the difference is visible, so this fits it instead:
+        the seam is a great circle, and a wrong figure makes the picture jump across it.
+        """
+        from .. import source as source_module
+
+        path = Path(payload["path"])
+        fmt = self._source_format(payload)
+        info = probe_media(path, self.session.ffmpeg)
+        # Spread the samples through the clip: one frame with a wall close on one side
+        # scores its own parallax as if it were a bad field of view.
+        seeks = [info.duration * fraction for fraction in (0.2, 0.5, 0.8)]             if info.is_video and info.duration else [0.0]
+        return source_module.fit_lens_fov(
+            self.session.ffmpeg, path, fmt, seeks=seeks,
+            workdir=self.session.cache / "fit",
+            # Fitting the mounting as well is the default: it is the setting nothing in
+            # the file reveals, and the one a user has no way to look up.
+            fit_rotation=bool(payload.get("fit_rotation", True)))
+
     def api_probe(self, payload: dict) -> dict:
         info = probe_media(payload["path"], self.session.ffmpeg)
         return {"media": media_payload(info)}
@@ -1062,23 +1268,23 @@ class Handler(BaseHTTPRequestHandler):
         time = float(payload.get("time", 0.0))
         target = self.session.next_name(".jpg")
 
-        # Decode the panorama once and keep it ungraded; grading happens from the
-        # cache, so moving a slider never re-seeks the video.
-        source = self.session.next_name(".jpg")
-        argv = [str(self.session.ffmpeg.path), "-hide_banner", "-loglevel", "error", "-y"]
-        if info.is_video and time > 0:
-            argv += ["-ss", f"{time:g}"]
-        argv += ["-i", str(info.path), "-vf", f"scale={PREVIEW_WIDTH}:-1",
-                 "-frames:v", "1", "-q:v", "3", str(source)]
-        result = subprocess.run(argv, capture_output=True, text=True, errors="replace")
-        if result.returncode != 0 or not source.exists():
-            raise FFmpegError(f"preview failed: {result.stderr.strip()}")
+        # Decode once and keep it ungraded; grading happens from the cache, so moving a
+        # slider never re-seeks the video.
+        fmt = self._source_format(payload)
+        view = self._preview_view(payload, fmt)
+        source = self._decode_source_frame(
+            info.path, time if info.is_video and time > 0 else None,
+            PREVIEW_WIDTH, fmt, view, self.session.next_name(".jpg"))
 
         self.session.preview_source = source
         self.session.preview_key = (str(info.path), time)
+        # Grading has to measure the panorama, not two circles in a black frame, so the
+        # auto-grade path re-decodes from these rather than from what is on screen.
+        self.session.preview_origin = (info.path, time if info.is_video else 0.0, fmt)
 
         graded = self._regrade(source, payload.get("grade"), PREVIEW_WIDTH, target)
-        return {"url": f"/preview/{graded.name}", "media": media_payload(info)}
+        return {"url": f"/preview/{graded.name}", "media": media_payload(info),
+                "view": view}
 
     def _regrade(self, source: Path, grade_data, width: int, target: Path) -> Path:
         """Apply a grade to an already-decoded frame."""
@@ -1138,13 +1344,32 @@ class Handler(BaseHTTPRequestHandler):
             target = self.session.next_name(".jpg")
 
         graded = self._regrade(source, grade_data, width, target)
+        # The grade is applied to the panorama and then follows it onto the lenses, so
+        # what the canvas shows is graded the same way whichever view it is in.
+        project = self.session.project
+        fmt = project.source_format if project else SourceFormat()
+        if str(payload.get("view") or "") == "lenses" and not fmt.is_equirect:
+            graded = self._as_lenses(
+                graded, fmt, width,
+                self._derived(f"lensgrade|{graded}|{width}|{fmt.lens_fov:g}", ".jpg"))
         return {"url": f"/preview/{graded.name}", "width": width}
 
     def api_grade_auto(self, payload: dict) -> dict:
-        """Measure the frame on screen and propose a grade for it."""
+        """Measure the frame on screen and propose a grade for it.
+
+        With a raw source on screen the measurement is taken from the panorama instead:
+        two fisheye circles come with black corners, and averaging those in would push
+        every exposure decision the wrong way.
+        """
         from .. import autograde
 
         source = self._grade_source(payload)
+        origin = self.session.preview_origin
+        if not payload.get("frame") and origin and not origin[2].is_equirect:
+            path, when, fmt = origin
+            source = self._decode_source_frame(
+                path, when or None, PREVIEW_WIDTH, fmt, "panorama",
+                self.session.next_name(".jpg"))
         grade, analysis = autograde.auto_grade(self.session.ffmpeg, source)
         return {
             "grade": asdict(grade),
@@ -1166,7 +1391,8 @@ class Handler(BaseHTTPRequestHandler):
         project = self.session.project
         frame_name = payload.get("frame")
         seek = None
-        if frame_name and project and project.resolved_sources():
+        extracted = bool(frame_name and project and project.resolved_sources())
+        if extracted:
             clip = safe_stem(project.resolved_sources()[0].stem)
             source_path = frames.frames_dir(project.root, clip) / frame_name
             if not source_path.exists():
@@ -1185,14 +1411,29 @@ class Handler(BaseHTTPRequestHandler):
         if seek:
             argv += ["-ss", f"{seek:g}"]
         grade = rig.grade.filter_chain()
-        argv += [
-            "-i", str(source_path),
-            "-vf", (f"{grade}," if grade else "")
-                   + (f"v360=e:rectilinear:yaw={camera.yaw:g}:pitch={camera.pitch:g}:"
-                      f"roll={camera.roll:g}:h_fov={camera.h_fov:g}:v_fov={camera.v_fov:g}:"
-                      f"w={width}:h={height}:interp={rig.output.interp}"),
-            "-frames:v", "1", "-q:v", "4", str(tile),
-        ]
+        # An extracted frame is equirect; a raw source is whatever the project says it
+        # is, and v360 cuts the camera straight out of it -- the same one-step
+        # projection the extraction uses, so the preview is not a different picture.
+        # Lenses that arrive separately are the exception: they have to be assembled
+        # first, at roughly the panorama size this tile is a slice of.
+        fmt = SourceFormat() if extracted else self._source_format(payload)
+        input_name, input_options = fmt.input_spec()
+        projection = ":".join([input_name, "rectilinear", *input_options])
+        camera_filter = (f"v360={projection}:yaw={camera.yaw:g}:pitch={camera.pitch:g}:"
+                         f"roll={camera.roll:g}:h_fov={camera.h_fov:g}:"
+                         f"v_fov={camera.v_fov:g}:w={width}:h={height}:"
+                         f"interp={rig.output.interp}")
+        argv += ["-i", str(source_path)]
+        if fmt.needs_graph:
+            assembled = max(width * 4, 512)
+            chains = fmt.ingest_chains((assembled, assembled // 2), label="src")
+            camera_filter = camera_filter.replace(f"v360={projection}",
+                                                  "v360=e:rectilinear")
+            chains.append(f"[src]{grade + ',' if grade else ''}{camera_filter}[tile]")
+            argv += ["-filter_complex", ";".join(chains), "-map", "[tile]"]
+        else:
+            argv += ["-vf", (f"{grade}," if grade else "") + camera_filter]
+        argv += ["-frames:v", "1", "-q:v", "4", str(tile)]
         result = subprocess.run(argv, capture_output=True, text=True, errors="replace")
         if result.returncode != 0 or not tile.exists():
             raise FFmpegError(f"camera preview failed: {result.stderr.strip()}")
@@ -1234,10 +1475,12 @@ class Handler(BaseHTTPRequestHandler):
         # it rather than making the user infer it from the auto setting.
         sizes = {}
         if source_width:
+            fmt = self._source_format(payload)
             fake = MediaInfo(path=Path("."), width=source_width, height=source_width // 2,
-                             fps=0.0, duration=0.0, frame_count=1, codec="", is_video=False)
+                             fps=0.0, duration=0.0, frame_count=1, codec="", is_video=False,
+                             video_streams=int(payload.get("source_streams") or 1))
             for camera in rig.normalized_cameras():
-                width, height = camera_size(camera, rig, fake)
+                width, height = camera_size(camera, rig, fake, fmt)
                 sizes[camera.name] = [width, height]
 
         return {"ok": True, "warnings": rig.warnings(),
@@ -1422,16 +1665,26 @@ class Handler(BaseHTTPRequestHandler):
             mode=payload.get("mode", "sharp"), value=float(payload.get("value", 2.0)),
             start=payload.get("start"), end=payload.get("end"))
         selection.validate()
+        # The projection is a property of the footage, so it is stored on the project:
+        # every later stage (previews, camera generation) reads it from there.
+        if "source_format" in payload:
+            project.source_format = SourceFormat.from_dict(payload["source_format"])
+            project.source_format.validate()
+        source_format = project.source_format
         session = self.session
         job = self.session.jobs["start"]
 
         def work(running_job) -> dict:
             info = probe_media(sources[0], session.ffmpeg)
+            if not source_format.is_equirect:
+                running_job.log(f"source is {source_format.label}; "
+                                "projecting to equirectangular on the way in")
             result = frames.extract_frames(
                 session.ffmpeg, info, selection, project.root,
                 on_progress=lambda frac, n, _t: running_job.progress(frac, f"frame {n}"),
                 on_analysis=lambda note: running_job.log(note),
-                should_cancel=running_job.cancel.is_set)
+                should_cancel=running_job.cancel.is_set,
+                source_format=source_format)
             project.frames = FrameSettings(
                 mode=selection.mode, value=selection.value,
                 start=selection.start, end=selection.end)
@@ -1464,12 +1717,15 @@ class Handler(BaseHTTPRequestHandler):
         sky_cone = (detect.sky_cone_angle
                     if detect.exclude_sky and detect.sky_method in ("auto", "cone")
                     else None)
+        # Trimming the lens edges is a property of the footage, so it comes from the
+        # source format rather than the rig or the detector.
+        seam_band = project.source_format.seam_band
         job = self.session.jobs["capture"]
 
         def work(running_job) -> dict:
             result = cameras.generate_cameras(
                 session.ffmpeg, frames_directory, rig, project.root, clip=clip,
-                sky_cone_angle=sky_cone, detect=detect,
+                sky_cone_angle=sky_cone, detect=detect, seam_band=seam_band,
                 on_progress=lambda frac, n, _t:
                     running_job.progress(0.4 * frac, f"projecting frame {n}"),
                 on_mask_progress=lambda frac, n, _t:
@@ -1512,6 +1768,7 @@ class Handler(BaseHTTPRequestHandler):
         # a fallback for the project-less path the tests still exercise.
         project = self.session.project
         output_dir = str(project.root) if project else (payload.get("output_dir") or "dataset")
+        source_format = self._source_format(payload)
         session = self.session
 
         def work(running_job) -> dict:
@@ -1528,6 +1785,7 @@ class Handler(BaseHTTPRequestHandler):
                     ffmpeg=session.ffmpeg,
                     on_analysis=lambda note: running_job.log(note),
                     mask_mode=payload.get("mask_mode", "sidecar"),
+                    source_format=source_format,
                 )
                 if not plan.passes:
                     running_job.log(f"{info.path.name}: already extracted")
@@ -1548,6 +1806,7 @@ class Handler(BaseHTTPRequestHandler):
             # -- and with which rig/frames, so it can tell "done" from "stale" later.
             if project is not None:
                 project.rig = rig
+                project.source_format = source_format
                 project.frames = FrameSettings(
                     mode=selection.mode, value=selection.value,
                     start=selection.start, end=selection.end)

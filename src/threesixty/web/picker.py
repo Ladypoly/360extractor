@@ -16,8 +16,11 @@ import subprocess
 import sys
 
 MEDIA_TYPES = [
-    ("360 media", "*.mp4 *.mov *.mkv *.insv *.jpg *.jpeg *.png *.tif *.tiff"),
-    ("Video", "*.mp4 *.mov *.mkv *.insv *.webm *.avi"),
+    # .insv (Insta360) and .osv (DJI Osmo 360) are MP4 containers with a video
+    # track per lens; ffmpeg reads them by content, so only the dialog filter
+    # had to learn about them.
+    ("360 media", "*.mp4 *.mov *.mkv *.insv *.osv *.jpg *.jpeg *.png *.tif *.tiff"),
+    ("Video", "*.mp4 *.mov *.mkv *.insv *.osv *.webm *.avi"),
     ("Images", "*.jpg *.jpeg *.png *.tif *.tiff"),
     ("All files", "*.*"),
 ]

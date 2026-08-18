@@ -5,7 +5,8 @@
 // was the strongest part of the old interface and the redesign is about the structure
 // around it, not about it.
 
-import { footprint, occlusionFraction } from "../geometry.js";
+import { dualFisheyeView, equirectView, footprintPaths, occlusionFraction }
+  from "../geometry.js";
 import {
   EmptyState, InspectorSection, StageActionBar, el, formatCount,
 } from "../components.js";
@@ -86,11 +87,18 @@ export function CaptureStage(ctx) {
   const source = InspectorSection("Source", { id: "cap-source" });
   const pathField = el("input", { type: "text", readonly: true,
                                   placeholder: "no source loaded" });
+  // Which picture to place the rig on. Only offered when there are two: a raw
+  // two-lens capture can be rigged on its own lenses, where the stitch line is visible.
+  const viewSelect = el("select", { id: "cap-view" },
+    ...[["lenses", "the lenses, side by side"], ["panorama", "the panorama they make"]]
+      .map(([value, label]) => el("option", { value }, label)));
+  const viewField = field("show", viewSelect);
   source.body.append(
     el("div", { class: "field field--stack" }, pathField),
     el("div", { class: "field", style: "margin-bottom:0" },
       el("button", { class: "btn btn--primary", type: "button", onclick: browse,
                      html: `${icon("folder", { size: 14 })}<span>Browse…</span>` })));
+  viewSelect.addEventListener("change", () => ctx.setSourceView(viewSelect.value));
 
   const rigSection = InspectorSection("Rig", { id: "cap-rig" });
   const presetSelect = el("select", {});
@@ -110,6 +118,7 @@ export function CaptureStage(ctx) {
       .map(([value, label]) => el("option", { value }, label)));
   const camList = el("div", {});
   rigSection.body.append(
+    viewField,
     el("div", { class: "field" }, presetSelect,
       el("button", { class: "btn", type: "button", style: "flex:0 0 auto",
                      onclick: applyPreset }, "Use"),
@@ -352,52 +361,41 @@ export function CaptureStage(ctx) {
       context2d.restore();
     }
 
-    context2d.strokeStyle = "rgba(255,255,255,.2)"; context2d.lineWidth = 1;
-    context2d.beginPath(); context2d.moveTo(0, H / 2); context2d.lineTo(W, H / 2);
-    context2d.stroke();
-    context2d.fillStyle = "rgba(255,255,255,.38)"; context2d.font = "11px sans-serif";
-    for (let yaw = -180; yaw <= 180; yaw += 45) {
-      const x = (yaw + 180) / 360 * W;
-      context2d.beginPath(); context2d.moveTo(x, H / 2 - 5); context2d.lineTo(x, H / 2 + 5);
-      context2d.stroke();
-      context2d.fillText(`${yaw}°`, x + 3, H / 2 - 8);
-    }
-
-    if (local.nadir > 0) {
-      const y = (90 + local.nadir) / 180 * H;
-      context2d.fillStyle = "rgba(255,140,26,.18)";
-      context2d.fillRect(0, y, W, H - y);
-      context2d.strokeStyle = "rgba(255,140,26,.7)";
-      context2d.setLineDash([6, 4]);
-      context2d.beginPath(); context2d.moveTo(0, y); context2d.lineTo(W, y);
-      context2d.stroke(); context2d.setLineDash([]);
-    }
+    const view = currentView();
+    drawGraticule(view, W, H);
+    if (local.nadir > 0) drawNadir(view, W, H);
 
     if (!local.rig) return;
     local.rig.cameras.forEach((camera, index) => {
       if (!camera.enabled) return;
-      const points = footprint(camera, local.rig.orientation, W, H);
+      const paths = footprintPaths(camera, local.rig.orientation, view, W, H);
       const colour = colourOf(index);
       const selected = index === local.selected;
 
-      for (const offset of [-W, 0, W]) {
-        context2d.beginPath();
-        points.forEach((point, i) => {
-          const x = point.x + offset;
-          i ? context2d.lineTo(x, point.y) : context2d.moveTo(x, point.y);
-        });
-        context2d.closePath();
-        context2d.fillStyle = colour + (selected ? "38" : "18");
-        context2d.fill();
-        context2d.strokeStyle = colour;
-        context2d.lineWidth = selected ? 2.5 : 1.2;
-        context2d.stroke();
+      // The panorama is drawn three times so whichever copy of the seam-crossing
+      // polygon is on screen appears; the lens view does not wrap, and its footprint
+      // is already split into one path per circle.
+      const offsets = view.wraps ? [-W, 0, W] : [0];
+      for (const offset of offsets) {
+        for (const points of paths) {
+          context2d.beginPath();
+          points.forEach((point, i) => {
+            const x = point.x + offset;
+            i ? context2d.lineTo(x, point.y) : context2d.moveTo(x, point.y);
+          });
+          context2d.closePath();
+          context2d.fillStyle = colour + (selected ? "38" : "18");
+          context2d.fill();
+          context2d.strokeStyle = colour;
+          context2d.lineWidth = selected ? 2.5 : 1.2;
+          context2d.stroke();
+        }
       }
 
       const yaw = camera.yaw + local.rig.orientation.yaw;
       const pitch = camera.pitch + local.rig.orientation.pitch;
-      const cx = ((((yaw + 180) % 360) + 360) % 360) / 360 * W;
-      const cy = (90 - pitch) / 180 * H;
+      const centre = view.project(yaw, pitch, W, H);
+      const cx = centre.x, cy = centre.y;
       context2d.fillStyle = colour;
       context2d.beginPath(); context2d.arc(cx, cy, selected ? 5 : 3.5, 0, 7);
       context2d.fill();
@@ -406,8 +404,102 @@ export function CaptureStage(ctx) {
     });
   }
 
+  function drawGraticule(view, W, H) {
+    context2d.strokeStyle = "rgba(255,255,255,.2)"; context2d.lineWidth = 1;
+    context2d.fillStyle = "rgba(255,255,255,.38)"; context2d.font = "11px sans-serif";
+
+    if (view.kind === "lenses") {
+      // Each lens is a circle; the horizon is its horizontal diameter. Bearings are
+      // marked around the rim, which is also where the two lenses meet.
+      for (const lens of [0, 1]) {
+        const c = view.circle(lens, W, H);
+        context2d.beginPath();
+        context2d.ellipse(c.x, c.y, c.rx - 1, c.ry - 1, 0, 0, Math.PI * 2);
+        context2d.stroke();
+        context2d.beginPath();
+        context2d.moveTo(c.x - c.rx, c.y); context2d.lineTo(c.x + c.rx, c.y);
+        context2d.stroke();
+      }
+      for (let yaw = -180; yaw < 180; yaw += 30) {
+        const at = view.project(yaw, 0, W, H);
+        context2d.beginPath();
+        context2d.moveTo(at.x, at.y - 5); context2d.lineTo(at.x, at.y + 5);
+        context2d.stroke();
+        context2d.fillText(`${yaw}°`, at.x + 3, at.y - 8);
+      }
+      return;
+    }
+
+    context2d.beginPath(); context2d.moveTo(0, H / 2); context2d.lineTo(W, H / 2);
+    context2d.stroke();
+    for (let yaw = -180; yaw <= 180; yaw += 45) {
+      const x = (yaw + 180) / 360 * W;
+      context2d.beginPath(); context2d.moveTo(x, H / 2 - 5); context2d.lineTo(x, H / 2 + 5);
+      context2d.stroke();
+      context2d.fillText(`${yaw}°`, x + 3, H / 2 - 8);
+    }
+  }
+
+  function drawNadir(view, W, H) {
+    context2d.strokeStyle = "rgba(255,140,26,.7)";
+    context2d.setLineDash([6, 4]);
+    if (view.kind === "lenses") {
+      // Straight down is the bottom of *both* circles, so the cone's edge is a pair of
+      // arcs rather than a horizontal line -- drawn as the curve it is.
+      let previous = null;
+      context2d.beginPath();
+      for (let yaw = -180; yaw <= 180; yaw += 3) {
+        const at = view.project(yaw, -local.nadir, W, H);
+        if (previous === null || at.lens !== previous) context2d.moveTo(at.x, at.y);
+        else context2d.lineTo(at.x, at.y);
+        previous = at.lens;
+      }
+      context2d.stroke();
+      context2d.setLineDash([]);
+      return;
+    }
+    const y = (90 + local.nadir) / 180 * H;
+    context2d.fillStyle = "rgba(255,140,26,.18)";
+    context2d.fillRect(0, y, W, H - y);
+    context2d.beginPath(); context2d.moveTo(0, y); context2d.lineTo(W, y);
+    context2d.stroke(); context2d.setLineDash([]);
+  }
+
+  /**
+   * The picture the rig is being placed on.
+   *
+   * A capture shot on two fisheye lenses is rigged in that view when the user asks for
+   * it: the stitch line is visible there, and a camera aimed across it is a camera whose
+   * images will be the worst in the set. The frames on disk stay equirect either way --
+   * this is a projection for the eye and the mouse, not a change to the dataset.
+   */
+  function currentView() {
+    const fmt = ctx.state.sourceFormat;
+    if (ctx.state.sourceView === "lenses" && fmt && fmt.projection === "dfisheye") {
+      return dualFisheyeView(fmt.lens_fov || 190);
+    }
+    return equirectView;
+  }
+
+  function inLensView() {
+    return currentView().kind === "lenses";
+  }
+
+  function syncViewField() {
+    const fmt = ctx.state.sourceFormat;
+    viewField.hidden = !(fmt && fmt.projection === "dfisheye");
+    viewSelect.value = ctx.state.sourceView || "panorama";
+  }
+
   function fitCanvas() {
-    const aspect = local.media && local.media.aspect ? local.media.aspect : 2;
+    // The picture being drawn decides the shape, not the file it came from. A raw
+    // two-lens source is 1:1 on disk and a panorama on screen, and taking the file's
+    // aspect squashed the whole 360 into a square -- with every footprint drawn over
+    // the wrong part of it.
+    const image = local.image;
+    const aspect = image && image.naturalHeight
+      ? image.naturalWidth / image.naturalHeight
+      : (local.media && local.media.aspect ? local.media.aspect : 2);
     const width = 1600;
     const height = Math.round(width / aspect);
     if (canvas.width !== width || canvas.height !== height) {
@@ -417,11 +509,8 @@ export function CaptureStage(ctx) {
   }
 
   function canvasAngles(event) {
-    const rect = canvas.getBoundingClientRect();
-    return {
-      yaw: (event.clientX - rect.left) / rect.width * 360 - 180,
-      pitch: 90 - (event.clientY - rect.top) / rect.height * 180,
-    };
+    const at = canvasPixel(event);
+    return currentView().unproject(at.x, at.y, canvas.width, canvas.height);
   }
 
   function canvasPixel(event) {
@@ -719,9 +808,10 @@ export function CaptureStage(ctx) {
   }
 
   async function gradedFrameUrl(name, width) {
-    if (gradeIsNeutral()) return `/frames/${name}?w=${width}`;
+    if (gradeIsNeutral()) return frameUrl(name, width);
     const { url } = await ctx.api.post("/api/preview/grade",
-                                       { frame: name, grade: readGrade(), width });
+                                       { frame: name, grade: readGrade(), width,
+                                         view: ctx.state.sourceView || "panorama" });
     return url;
   }
 
@@ -772,6 +862,14 @@ export function CaptureStage(ctx) {
 
   for (const [button, mode] of [[paintButton, "paint"], [eraseButton, "erase"]]) {
     button.addEventListener("click", () => {
+      // The painted occluder is stored as an equirect image, and the brush writes
+      // straight into it. On the lens view the two do not share a pixel grid, so this
+      // says which picture to paint in rather than painting in the wrong one.
+      if (inLensView()) {
+        ctx.flash("Painting works on the panorama — switch the view to paint.",
+                  { level: "info" });
+        return;
+      }
       local.paint.mode = local.paint.mode === mode ? null : mode;
       paintButton.classList.toggle("btn--primary", local.paint.mode === "paint");
       eraseButton.classList.toggle("btn--primary", local.paint.mode === "erase");
@@ -832,6 +930,8 @@ export function CaptureStage(ctx) {
         rig: local.rig,
         source_width: local.media ? local.media.width : 0,
         source_height: local.media ? local.media.height : 0,
+        // A lens per stream means the file's own width is half the picture.
+        source_streams: local.media ? local.media.video_streams : 1,
       });
       local.coverage = data.coverage || {};
       renderCameras();
@@ -856,7 +956,14 @@ export function CaptureStage(ctx) {
     if (!path) return;
     try {
       const data = await ctx.api.post("/api/preview", {
+        // Always the panorama here, whatever Start is showing: the footprints drawn
+        // over this canvas are equirect coordinates, so two fisheye circles would put
+        // every camera in the wrong place. And say what the footage is: a source picked
+        // from *this* tab has never been through Start, so the server would otherwise
+        // read a raw two-lens file as a panorama and stretch it into nonsense.
         path, time: parseFloat(timeSlider.value) || 0, grade: readGrade(),
+        view: ctx.state.sourceView || "panorama",
+        source_format: ctx.state.sourceFormat,
       });
       local.media = data.media;
       ctx.setSource(data.media);
@@ -975,6 +1082,7 @@ export function CaptureStage(ctx) {
       try {
         const data = await ctx.api.post("/api/rig/validate", {
           rig: local.rig, source_width: local.media ? local.media.width : 0,
+          source_streams: local.media ? local.media.video_streams : 1,
         });
         local.sizes = data.sizes || {};
       } catch (error) { /* shown when the user acts on it */ }
@@ -1067,8 +1175,10 @@ export function CaptureStage(ctx) {
     return pending;
   }
 
-  function frameUrl(name) {
-    return `/frames/${name}?w=${CANVAS_WIDTH}`;
+  function frameUrl(name, width = CANVAS_WIDTH) {
+    // The view is part of the URL, so switching between the panorama and the lenses is
+    // a different cached image rather than the same one relabelled.
+    return `/frames/${name}?w=${width}&view=${ctx.state.sourceView || "panorama"}`;
   }
 
   /** The mask as a red layer: opaque where the mask is black, i.e. where it is ignored. */
@@ -1090,11 +1200,12 @@ export function CaptureStage(ctx) {
   }
 
   async function maskLayer(name) {
-    const key = `${name}|${maskSignature()}`;
+    const view = ctx.state.sourceView || "panorama";
+    const key = `${name}|${maskSignature()}|${view}`;
     if (tints.has(key)) return tints.get(key);
     const detect = ctx.state.project ? ctx.state.project.detect : undefined;
     const { url } = await ctx.api.post("/api/mask/frame",
-                                       { frame: name, width: CANVAS_WIDTH, detect });
+                                       { frame: name, width: CANVAS_WIDTH, detect, view });
     const layer = url ? tintMask(await loadImage(url)) : null;
     tints.set(key, layer);
     return layer;
@@ -1193,7 +1304,30 @@ export function CaptureStage(ctx) {
       }
       lastCaptureState = job ? job.state : null;
     },
-    onEnter: () => { updateLanding(); refreshFrames(); fitCanvas(); },
+    applyView(view) {
+      viewSelect.value = view;
+      syncViewField();
+      // The picture, the mask and the overlay all change together.
+      local.image = null;
+      if (local.frames.length) loadFrame(local.frameIndex);
+      else if (local.media) loadMedia();
+      else { fitCanvas(); draw(); }
+    },
+    onEnter: async () => {
+      syncViewField();
+      updateLanding();
+      await refreshFrames();
+      // Nothing extracted yet and nothing decoded: show the source itself rather than
+      // an empty canvas with the rig floating on it. Arriving from Start leaves this
+      // tab with no picture at all otherwise, since loading a source there deliberately
+      // does not decode anything here.
+      const sources = (ctx.state.project && ctx.state.project.sources) || [];
+      if (!local.frames.length && !local.media && sources.length) {
+        pathField.value = sources[0];
+        await loadMedia();
+      }
+      fitCanvas();
+    },
     applyProject(project, { keepMedia } = {}) {
       if (!project) return;
       local.rig = project.rig;
@@ -1211,6 +1345,7 @@ export function CaptureStage(ctx) {
       occluder.setNote(local.nadir ? `below −${local.nadir}°` : "no cone");
 
       syncRigControls();
+      syncViewField();
       setUndetected(project.undetected);
       refresh(); refreshCoverage(); updateLanding();
       if (!keepMedia && project.sources && project.sources.length) {

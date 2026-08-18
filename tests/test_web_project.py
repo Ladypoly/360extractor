@@ -19,6 +19,7 @@ import pytest
 
 from threesixty import dataset
 from threesixty.project import Project
+from threesixty.source import SourceFormat
 from threesixty.web.server import Handler, Session
 
 pytestmark = pytest.mark.ffmpeg
@@ -330,6 +331,139 @@ class TestTwoStageCapture:
         assert reopened.status("extract") == "done"
         for i in range(2):
             assert (tmp_path / "proj" / "images" / f"c{i}" / "images").is_dir()
+
+    def test_a_dual_fisheye_import_lands_as_equirect_frames(self, make_ui, tmp_path,
+                                                            dfisheye_clip):
+        """Choosing the projection in the UI has to reach the decode, and stay chosen."""
+        from threesixty.ffmpeg import probe_media, resolve_ffmpeg
+
+        source = tmp_path / "raw.mp4"
+        shutil.copy(dfisheye_clip, source)
+        project = Project.create(tmp_path / "proj", sources=[str(source)])
+        base, _ = make_ui(project)
+
+        status, body = post(base, "/api/frames/extract",
+                            {"mode": "fps", "value": 5,
+                             "source_format": {"projection": "dfisheye",
+                                               "lens_fov": 190}})
+        assert status == 200 and body["started"]
+        assert self._wait(base, "start")["state"] == "done"
+
+        frames = sorted((tmp_path / "proj" / "frames").glob("*.jpg"))
+        assert frames
+        frame = probe_media(frames[0], resolve_ffmpeg())
+        assert frame.looks_equirectangular
+        assert (frame.width, frame.height) == (972, 486)
+
+        # Stored, so camera generation and every later preview read the same answer.
+        reopened = Project.load(tmp_path / "proj")
+        assert reopened.source_format.projection == "dfisheye"
+        assert reopened.source_format.lens_fov == 190
+
+    def test_segments_inherit_the_projection(self, make_ui, tmp_path, dfisheye_clip):
+        """A segment is the same footage, so it has to be read the same way."""
+        source = tmp_path / "raw.mp4"
+        shutil.copy(dfisheye_clip, source)
+        project = Project.create(tmp_path / "proj", sources=[str(source)])
+        base, _ = make_ui(project)
+
+        status, body = post(base, "/api/segment",
+                            {"path": str(source), "mode": "duration", "seconds": 1,
+                             "source_format": {"projection": "dfisheye",
+                                               "lens_fov": 190}})
+        assert status == 200, body
+        assert body["segments"]
+        for made in body["segments"]:
+            assert Project.load(made["root"]).source_format.projection == "dfisheye"
+
+    def test_a_two_stream_import_lands_as_one_panorama(self, make_ui, tmp_path,
+                                                       two_stream_clip):
+        """The QooCam shape, end to end through the job the UI actually starts."""
+        from threesixty.ffmpeg import probe_media, resolve_ffmpeg
+
+        source = tmp_path / "twolens.mp4"
+        shutil.copy(two_stream_clip, source)
+        project = Project.create(tmp_path / "proj", sources=[str(source)])
+        base, _ = make_ui(project)
+
+        status, body = post(base, "/api/frames/extract",
+                            {"mode": "fps", "value": 5,
+                             "source_format": {"projection": "dfisheye",
+                                               "lens_fov": 190, "layout": "streams",
+                                               "rotate": [90, -90]}})
+        assert status == 200 and body["started"]
+        assert self._wait(base, "start")["state"] == "done"
+
+        frames = sorted((tmp_path / "proj" / "frames").glob("*.jpg"))
+        assert frames
+        frame = probe_media(frames[0], resolve_ffmpeg())
+        assert frame.looks_equirectangular
+        # Both lenses, not one: 512 per stream is a 1024-wide pair.
+        assert frame.width == 972
+
+        stored = Project.load(tmp_path / "proj").source_format
+        assert stored.layout == "streams" and stored.rotate == (90.0, -90.0)
+
+    def test_frames_can_be_served_back_on_their_lenses(self, make_ui, tmp_path,
+                                                       two_stream_clip):
+        """The rig can be placed on the picture the capture was shot in.
+
+        The frames on disk stay equirect -- that is what the tiles are cut from -- so
+        this is a projection for the canvas: the same frame, sent back through the lenses
+        it came from, with the black outside each circle that implies.
+        """
+        import urllib.request
+        from threesixty.ffmpeg import probe_media, resolve_ffmpeg
+
+        source = tmp_path / "twolens.mp4"
+        shutil.copy(two_stream_clip, source)
+        project = Project.create(tmp_path / "proj", sources=[str(source)])
+        project.source_format = SourceFormat("dfisheye", 190, layout="streams",
+                                             rotate=(90.0, -90.0))
+        project.save()
+        base, _ = make_ui(project)
+
+        status, body = post(base, "/api/frames/extract", {"mode": "fps", "value": 2})
+        assert status == 200 and body["started"]
+        assert self._wait(base, "start")["state"] == "done"
+        name = sorted((tmp_path / "proj" / "frames").glob("*.jpg"))[0].name
+
+        images = {}
+        for view in ("panorama", "lenses"):
+            with urllib.request.urlopen(
+                    f"{base}/frames/{name}?w=512&view={view}", timeout=60) as response:
+                target = tmp_path / f"{view}.jpg"
+                target.write_bytes(response.read())
+            images[view] = target
+            info = probe_media(target, resolve_ffmpeg())
+            assert (info.width, info.height) == (512, 256), view
+
+        assert images["panorama"].read_bytes() != images["lenses"].read_bytes()
+        # A lens picture is two circles in a rectangle, so roughly a fifth of it is the
+        # black outside them. A panorama has no such thing -- which is the difference
+        # this is really checking.
+        from PIL import Image
+
+        def dark_fraction(path):
+            with Image.open(path) as image:
+                grey = image.convert("L")
+                pixels = list(grey.getdata())
+            return sum(1 for value in pixels if value < 24) / len(pixels)
+
+        assert dark_fraction(images["lenses"]) > 0.10
+        assert dark_fraction(images["panorama"]) < 0.05
+
+    def test_an_impossible_projection_is_refused(self, make_ui, tmp_path, equirect_clip):
+        source = tmp_path / "drive.mp4"
+        shutil.copy(equirect_clip, source)
+        project = Project.create(tmp_path / "proj", sources=[str(source)])
+        base, _ = make_ui(project)
+
+        status, body = post(base, "/api/frames/extract",
+                            {"mode": "fps", "value": 5,
+                             "source_format": {"projection": "hemisphere"}})
+        # A bad setting is the caller's fault, and says which one it was.
+        assert status == 400 and "projection" in body["error"]
 
     def test_frames_list_and_serving(self, make_ui, tmp_path, equirect_clip):
         source = tmp_path / "drive.mp4"

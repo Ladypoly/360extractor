@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from .rig import Rig, RigError, ring
+from .source import SourceFormat
 
 SCHEMA_VERSION = 2
 PROJECT_FILENAME = "project.json"
@@ -108,6 +109,9 @@ class Project:
     sources: list[str] = field(default_factory=list)
     rig: Rig = field(default_factory=lambda: ring(8))
     frames: FrameSettings = field(default_factory=FrameSettings)
+    #: What projection the footage is in. Equirectangular unless the camera wrote its
+    #: raw dual-fisheye file, which is converted on the way in -- see source.py.
+    source_format: SourceFormat = field(default_factory=SourceFormat)
     output: OutputSettings = field(default_factory=OutputSettings)
     detect: DetectSettings = field(default_factory=DetectSettings)
     stages: dict[str, Stage] = field(default_factory=dict)
@@ -188,6 +192,11 @@ class Project:
                 "layout": self.output.layout,
                 "mask_mode": self.output.mask_mode,
             }
+            # Only when it is not the default, so every project that predates
+            # dual-fisheye support keeps the fingerprint it already has and does not
+            # announce itself as stale on the next open.
+            if not self.source_format.is_equirect:
+                payload["source_format"] = self.source_format.to_dict()
         elif stage == "mask":
             payload = {
                 "extract": self.fingerprint("extract"),
@@ -246,6 +255,7 @@ class Project:
             "sources": self.sources,
             "rig": self.rig.to_dict(),
             "frames": asdict(self.frames),
+            "source_format": self.source_format.to_dict(),
             "output": asdict(self.output),
             "detect": asdict(self.detect),
             "stages": {name: asdict(stage) for name, stage in self.stages.items()},
@@ -292,6 +302,7 @@ class Project:
                 sources=list(data.get("sources", [])),
                 rig=rig,
                 frames=FrameSettings(**frames),
+                source_format=SourceFormat.from_dict(data.get("source_format")),
                 output=OutputSettings(**data.get("output", {})),
                 detect=DetectSettings(**data.get("detect", {})),
                 created=data.get("created", ""),

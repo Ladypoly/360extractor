@@ -81,6 +81,25 @@ def app_ready(ffmpeg, tmp_path, equirect_clip):
 
 
 @pytest.fixture
+def raw_app(ffmpeg, tmp_path, two_stream_clip):
+    """A project on a raw two-lens source: 1:1 on disk, a panorama on screen."""
+    from threesixty.source import SourceFormat
+
+    project = Project.create(tmp_path / "raw", sources=[str(two_stream_clip)])
+    project.source_format = SourceFormat("dfisheye", 190, layout="streams",
+                                         rotate=(90.0, -90.0))
+    project.save()
+    port = free_port()
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", port),
+        type("Bound", (Handler,), {"session": Session(ffmpeg, project)}))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{port}", project
+    server.shutdown()
+    server.server_close()
+
+
+@pytest.fixture
 def empty_app(ffmpeg):
     """A server with no project open: the front-door / landing case."""
     port = free_port()
@@ -186,13 +205,202 @@ class TestAutosaveOwnership:
         page.wait_for_timeout(200)
         # Change a Start control to trigger an autosave.
         page.evaluate("""() => {
-            const s = document.querySelector('#stage-panel-start select');
+            const s = document.querySelector('#start-frame-mode');
             s.value = 'fps'; s.dispatchEvent(new Event('change'));
         }""")
         page.wait_for_timeout(1600)   # autosave debounce + round trip
         project = page.evaluate(
             "async () => (await (await fetch('/api/project')).json()).project")
         assert project and project["sources"], "autosave wiped the source"
+
+
+class TestSourceProjection:
+    """A raw dual-fisheye file has to be declared, because it looks like a panorama."""
+
+    def test_start_offers_the_projection(self, page):
+        page.click("#stage-tab-start")
+        options = page.eval_on_selector(
+            "#start-projection", "s => [...s.options].map(o => o.value)")
+        assert options == ["equirect", "dfisheye", "fisheye"]
+        assert page.input_value("#start-projection") == "equirect"
+
+    def test_the_lens_field_appears_only_for_a_fisheye_source(self, page):
+        page.click("#stage-tab-start")
+        assert page.locator("#start-lens-fov").is_hidden()
+
+        page.select_option("#start-projection", "dfisheye")
+        assert page.locator("#start-lens-fov").is_visible()
+
+    def test_the_lens_controls_appear_only_for_a_raw_source(self, page):
+        page.click("#stage-tab-start")
+        for control in ("#start-lens-layout", "#start-lens-rotate", "#start-lens-trim",
+                        "#start-view"):
+            assert page.locator(control).is_hidden(), control
+
+        page.select_option("#start-projection", "dfisheye")
+        for control in ("#start-lens-layout", "#start-lens-rotate", "#start-lens-trim",
+                        "#start-view"):
+            assert page.locator(control).is_visible(), control
+
+    def test_a_single_fisheye_has_no_layout_to_choose(self, page):
+        # One lens cannot be side by side with anything.
+        page.click("#stage-tab-start")
+        page.select_option("#start-projection", "fisheye")
+        assert page.locator("#start-lens-layout").is_hidden()
+        assert page.locator("#start-lens-rotate").is_visible()
+
+    def test_the_qoocam_rotation_is_offered_by_name(self, page):
+        page.click("#stage-tab-start")
+        labels = page.eval_on_selector(
+            "#start-lens-rotate", "s => [...s.options].map(o => o.textContent)")
+        assert any("QooCam" in label for label in labels)
+
+    def test_trimming_says_what_it_costs(self, page):
+        """The trim takes the poles with it, which is worth saying before it happens."""
+        page.click("#stage-tab-start")
+        page.select_option("#start-projection", "dfisheye")
+        page.fill("#start-lens-trim", "8")
+        page.dispatch_event("#start-lens-trim", "change")
+        hint = page.locator("#stage-panel-start .section", has=page.locator(
+            "#start-lens-trim")).inner_text()
+        assert "8°" in hint, hint
+        # The seam runs through the poles, so trimming takes the sky and the ground
+        # straight below with it. Surprising enough to be said before it happens.
+        assert "sky" in hint.lower(), hint
+
+    def test_the_choice_is_saved_to_the_project(self, page):
+        page.click("#stage-tab-start")
+        page.select_option("#start-projection", "dfisheye")
+        page.wait_for_timeout(1600)   # autosave debounce + round trip
+        project = page.evaluate(
+            "async () => (await (await fetch('/api/project')).json()).project")
+        assert project["source_format"]["projection"] == "dfisheye"
+
+
+class TestCaptureOnRawFootage:
+    """Capture works in panorama coordinates, whatever shape the file on disk is."""
+
+    def test_the_canvas_is_a_panorama_not_the_file_s_own_shape(self, browser, raw_app):
+        """The reported break: a 1:1 raw file squashed the whole 360 into a square.
+
+        The canvas is sized from the *picture* now, not from the source's dimensions --
+        every footprint is drawn in equirect coordinates over it, so a square canvas put
+        all of them in the wrong place.
+        """
+        base, _ = raw_app
+        page = open_page(browser, base)
+        page.click("#stage-tab-capture")
+        page.wait_for_timeout(4000)
+
+        size = page.eval_on_selector(
+            "#stage-panel-capture canvas",
+            "c => ({ width: c.width, height: c.height })")
+        assert size["width"] == 2 * size["height"], size
+        assert not page.problems, page.problems
+
+    def test_it_shows_the_source_before_anything_is_extracted(self, browser, raw_app):
+        """Arriving from Start used to leave this tab with an empty canvas."""
+        base, _ = raw_app
+        page = open_page(browser, base)
+        page.click("#stage-tab-capture")
+        page.wait_for_timeout(4000)
+        # The empty-state class is what covers the editor with the front door.
+        empty = page.eval_on_selector(
+            "#stage-panel-capture", "p => p.classList.contains('stage-panel--empty')")
+        assert not empty
+        assert page.eval_on_selector(
+            "#stage-panel-capture canvas",
+            "c => c.getContext('2d').getImageData(c.width / 2, c.height / 2, 1, 1)"
+            ".data[3] > 0"), "nothing was drawn on the canvas"
+        assert not page.problems, page.problems
+
+
+class TestTheViewFollowsTheFootage:
+    """One choice of picture for the whole app.
+
+    Picking the lens view in Start and then being handed a panorama in Capture is the
+    same capture described two different ways, and the rig placed on one does not read
+    against the other.
+    """
+
+    def test_capture_offers_the_view_for_a_raw_source(self, browser, raw_app):
+        base, _ = raw_app
+        page = open_page(browser, base)
+        page.click("#stage-tab-capture")
+        page.wait_for_timeout(1500)
+        assert page.locator("#cap-view").is_visible()
+        assert not page.problems, page.problems
+
+    def test_a_stitched_source_has_no_view_to_choose(self, page):
+        page.click("#stage-tab-capture")
+        page.wait_for_timeout(500)
+        assert page.locator("#cap-view").is_hidden()
+
+    def test_choosing_the_lenses_in_start_carries_into_capture(self, browser, raw_app):
+        base, _ = raw_app
+        page = open_page(browser, base)
+        page.click("#stage-tab-start")
+        page.select_option("#start-view", "lenses")
+        page.wait_for_timeout(600)
+        page.click("#stage-tab-capture")
+        page.wait_for_timeout(2500)
+        assert page.input_value("#cap-view") == "lenses"
+
+    def test_switching_back_in_capture_moves_start_too(self, browser, raw_app):
+        base, _ = raw_app
+        page = open_page(browser, base)
+        page.click("#stage-tab-capture")
+        page.wait_for_timeout(1500)
+        page.select_option("#cap-view", "panorama")
+        page.wait_for_timeout(1500)
+        page.click("#stage-tab-start")
+        assert page.input_value("#start-view") == "panorama"
+
+
+class TestAimingOnTheLenses:
+    """Dragging a camera on the lens view has to mean what it looks like it means."""
+
+    def test_dragging_aims_the_camera_where_it_was_dropped(self, browser, raw_app):
+        """Drop a camera half way out along the front lens and it should be aimed there.
+
+        Half the radius of a 190-degree lens is 47.5 degrees off its axis, and the axis
+        is dead ahead -- so this checks the inverse projection through the real UI,
+        not just the arithmetic in isolation.
+        """
+        base, _ = raw_app
+        page = open_page(browser, base)
+        page.click("#stage-tab-capture")
+        page.wait_for_timeout(2500)
+        page.select_option("#cap-view", "lenses")
+        page.wait_for_timeout(2500)
+
+        canvas = page.locator("#stage-panel-capture canvas")
+        box = canvas.bounding_box()
+        size = page.eval_on_selector("#stage-panel-capture canvas",
+                                     "c => ({ w: c.width, h: c.height })")
+
+        def client(x, y):
+            return (box["x"] + x / size["w"] * box["width"],
+                    box["y"] + y / size["h"] * box["height"])
+
+        # The centre of the right-hand circle is the front lens's axis: bearing zero.
+        start = client(3 * size["w"] / 4, size["h"] / 2)
+        end = client(3 * size["w"] / 4 - size["w"] / 8, size["h"] / 2)
+        page.mouse.move(*start)
+        page.mouse.down()
+        page.mouse.move(*end, steps=8)
+        page.mouse.up()
+        page.wait_for_timeout(600)
+
+        aimed = page.evaluate("""() => {
+            const rows = [...document.querySelectorAll('#stage-panel-capture .inspector input')]
+              .filter((i) => i.type === 'text' && i.value === 'c00');
+            return rows.length ? rows[0].closest('div').textContent : null;
+        }""")
+        assert aimed is not None, "the first camera vanished from the list"
+        degrees = float(aimed.split("°")[0].split()[-1])
+        assert -60 < degrees < -35, aimed
+        assert not page.problems, page.problems
 
 
 class TestStageOwnership:

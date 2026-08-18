@@ -55,6 +55,8 @@ class Occluder:
             return cls(kind=kind, angle=float(data.get("angle", 0)))
         if kind == "zenith_cone":
             return cls(kind=kind, angle=float(data.get("angle", 0)))
+        if kind == "seam_band":
+            return cls(kind=kind, angle=float(data.get("angle", 0)))
         if kind == "equirect_mask":
             path = data.get("path")
             if not path:
@@ -101,6 +103,19 @@ def build_equirect_mask(ffmpeg: FFmpegInfo, occluders: Sequence[Occluder],
     if boxes:
         chain.append(f"{label}{','.join(boxes)}[base]")
         label = "[base]"
+
+    # The dual-fisheye seam: the great circle 90 degrees from both lens axes, which is
+    # where one lens hands over to the other. It is not a rectangle -- it passes through
+    # both poles, so the band widens towards them and closes the caps entirely -- so it
+    # is drawn per pixel rather than with boxes. A direction is on the seam when its
+    # angle to the front axis is within `angle` of 90, and cos(that angle) is exactly
+    # cos(pitch)cos(yaw).
+    for occluder in occluders:
+        if occluder.kind == "seam_band" and occluder.angle > 0:
+            expression = (f"if(lt(abs(cos((0.5-Y/H)*PI)*cos((X/W)*2*PI-PI)),"
+                          f"sin({occluder.angle:g}*PI/180)),0,255)")
+            chain.append(f"{label}format=gray,geq=lum='{expression}'[seam]")
+            label = "[seam]"
 
     index = 1
     for occluder in occluders:

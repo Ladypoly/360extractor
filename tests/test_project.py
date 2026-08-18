@@ -19,6 +19,7 @@ from threesixty.project import (
     find,
 )
 from threesixty.rig import Camera, ring
+from threesixty.source import SourceFormat
 
 
 @pytest.fixture
@@ -203,6 +204,39 @@ class TestStages:
         one = Project.create(tmp_path / "a", rig=ring(4))
         two = Project.create(tmp_path / "b", rig=ring(4))
         assert one.fingerprint("extract") == two.fingerprint("extract")
+
+
+class TestSourceProjection:
+    """What the footage arrives as is a project setting: the UI, the CLI and the
+    extraction all have to agree about it long after the video was chosen."""
+
+    def test_defaults_to_equirect(self, project):
+        assert project.source_format == SourceFormat()
+
+    def test_survives_save_and_load(self, project):
+        project.source_format = SourceFormat("dfisheye", 187.0)
+        project.save()
+        assert Project.load(project.root).source_format == SourceFormat("dfisheye", 187.0)
+
+    def test_a_project_from_before_the_setting_existed_reads_as_equirect(self, tmp_path):
+        project = Project.create(tmp_path / "old", rig=ring(4))
+        data = json.loads(project.file.read_text(encoding="utf-8"))
+        del data["source_format"]
+        project.file.write_text(json.dumps(data), encoding="utf-8")
+        assert Project.load(project.root).source_format == SourceFormat()
+
+    def test_changing_the_projection_makes_extraction_stale(self, project):
+        project.mark_done("extract", images=160)
+        project.source_format = SourceFormat("dfisheye")
+        assert project.status("extract") == "stale", (
+            "the images were cut from a different reading of the same pixels"
+        )
+
+    def test_an_equirect_project_keeps_the_fingerprint_it_always_had(self, project):
+        """Adding this setting must not mark every existing project stale."""
+        before = project.fingerprint("extract")
+        project.source_format = SourceFormat("equirect", lens_fov=123)
+        assert project.fingerprint("extract") == before
 
 
 class TestSnapshots:

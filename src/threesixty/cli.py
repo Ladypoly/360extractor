@@ -37,6 +37,7 @@ from .plan import (
 )
 from .project import STAGES, FrameSettings, Project, ProjectError
 from .rig import PRESETS, Output, Rig, RigError, cube, dome, handheld, ring, car_forward
+from .source import DEFAULT_LENS_FOV, PROJECTIONS, SourceFormat
 
 
 def _err(message: str) -> None:
@@ -123,13 +124,55 @@ def cmd_probe(args: argparse.Namespace) -> int:
 
         kind = "video" if info.is_video else "still"
         print(f"{info.path.name}")
-        print(f"  {info.width}x{info.height}  aspect {info.aspect:.3f}  {kind}  {info.codec}")
+        print(f"  {info.width}x{info.height}  aspect {info.aspect:.3f}  {kind}  {info.codec}"
+              + (f"  {info.video_streams} video streams" if info.video_streams > 1 else ""))
         if info.is_video:
             print(f"  {info.fps:g} fps  {info.duration:.2f}s  ~{info.frame_count} frames")
-        if not info.looks_equirectangular:
+
+        chosen = _source_format_from_args(args)
+        declared = not chosen.is_equirect
+        suggested = False
+        if chosen.is_equirect:
+            # What the container gives away, offered rather than assumed.
+            suggestion = SourceFormat.detect(info)
+            if suggestion is not None:
+                suggested = True
+                flags = f"--projection {suggestion.projection}"
+                if suggestion.layout == "streams":
+                    flags += " --lens-layout streams"
+                if suggestion.rotate:
+                    flags += " --lens-rotate " + ",".join(
+                        f"{r:g}" for r in suggestion.rotate)
+                print(f"  looks like {suggestion.label}; extract it with {flags}")
+                chosen = suggestion if getattr(args, "fit_lens", False) else chosen
+        else:
+            print(f"  reading it as {chosen.label}"
+                  f" -> {'x'.join(str(v) for v in chosen.equirect_size_for(info))}"
+                  " equirectangular")
+
+        if getattr(args, "fit_lens", False):
+            if chosen.projection != "dfisheye":
+                _err(f"{info.path.name}: --fit-lens needs a dual-fisheye source; "
+                     "pass --projection dfisheye (and --lens-layout / --lens-rotate)")
+                status = 1
+                continue
+            from .source import fit_lens_fov
+            seeks = [info.duration * f for f in (0.2, 0.5, 0.8)]                 if info.is_video and info.duration else [0.0]
+            print("  fitting the lens field of view…", flush=True)
+            result = fit_lens_fov(ffmpeg, info.path, chosen, seeks=seeks)
+            rotate = ",".join(f"{r:g}" for r in result["rotate"])
+            print(f"  lenses line up best at {result['lens_fov']:g}°, mounted "
+                  f"{rotate}° (mismatch {result['mismatch']:.1f})")
+            print(f"  extract it with --lens-fov {result['lens_fov']:g} "
+                  f"--lens-rotate {rotate}")
+        # Only worth saying when the file still claims to be a panorama: a raw file
+        # that has been declared, or recognised a line above, is not 2:1 and should not
+        # be. Repeating the warning there contradicts the advice just given.
+        if not info.looks_equirectangular and not declared and not suggested:
             print(
                 "  warning: not a 2:1 image -- equirectangular sources are 2:1. "
-                "Extraction will run but the geometry will be wrong."
+                "Extraction will run but the geometry will be wrong. If this is a "
+                "camera's raw file, extract it with --projection dfisheye."
             )
     return status
 
@@ -228,6 +271,22 @@ def load_rig(value: str) -> Rig:
 
 
 # -- extract ----------------------------------------------------------------
+
+
+def _source_format_from_args(args: argparse.Namespace) -> SourceFormat:
+    """The source projection the flags asked for, defaulting to equirectangular."""
+    rotate = getattr(args, "lens_rotate", None) or ""
+    try:
+        rotations = tuple(float(part) for part in rotate.split(",") if part.strip())
+    except ValueError:
+        raise SystemExit(f"--lens-rotate takes degrees, e.g. 90,-90; got {rotate!r}")
+    fmt = SourceFormat(projection=getattr(args, "projection", None) or "equirect",
+                       lens_fov=getattr(args, "lens_fov", None) or DEFAULT_LENS_FOV,
+                       layout=getattr(args, "lens_layout", None) or "single",
+                       rotate=rotations,
+                       trim=getattr(args, "lens_trim", None) or 0.0)
+    fmt.validate()
+    return fmt
 
 
 def _selection_from_args(args: argparse.Namespace) -> FrameSelection:
@@ -409,12 +468,15 @@ def cmd_project_new(args: argparse.Namespace) -> int:
                                        start=selection.start, end=selection.end)
     if args.classes is not None:
         project.detect.classes = list(args.classes)
+    project.source_format = _source_format_from_args(args)
     project.save()
 
     print(f"created {project.file}")
     print(f"  rig     {project.rig.name} ({len(project.rig.enabled_cameras)} cameras)")
     print(f"  frames  {project.frames.mode} {project.frames.value:g}"
           + (" seconds" if project.frames.mode == "sharp" else ""))
+    if not project.source_format.is_equirect:
+        print(f"  source  {project.source_format.label}")
     print(f"  masking {', '.join(project.detect.classes) or 'off'}")
     print(f"  sources {len(project.sources) or 'none yet'}")
     return 0
@@ -435,6 +497,7 @@ def cmd_project_show(args: argparse.Namespace) -> int:
     print(f"\n  rig      {project.rig.name}, "
           f"{len(project.rig.enabled_cameras)}/{len(project.rig.cameras)} cameras")
     print(f"  frames   {project.frames.mode} {project.frames.value:g}")
+    print(f"  source   {project.source_format.label}")
     print(f"  output   layout={project.output.layout} mask={project.output.mask_mode}")
     print(f"  detect   {project.detect.backend}, {', '.join(project.detect.classes)}")
 
@@ -539,6 +602,7 @@ def _extract_project(project: Project, ffmpeg, args) -> ExtractResult:
             resume=False, ffmpeg=ffmpeg,
             on_analysis=lambda note: print(f"  {note}"),
             mask_mode=project.output.mask_mode,
+            source_format=project.source_format,
         )
         for line in mask_apply.summarize(plan.mask_plan) if plan.mask_plan else []:
             print(f"  {line}")
@@ -591,7 +655,8 @@ def cmd_ui(args: argparse.Namespace) -> int:
     return 0
 
 
-def _grade_sample(source: str, ffmpeg, selection: FrameSelection) -> Path:
+def _grade_sample(source: str, ffmpeg, selection: FrameSelection,
+                  source_format: "SourceFormat | None" = None) -> Path:
     """One frame from partway into the clip, for auto-grade to measure.
 
     Taken from the middle of the chosen range rather than the first frame: the opening
@@ -609,7 +674,8 @@ def _grade_sample(source: str, ffmpeg, selection: FrameSelection) -> Path:
     argv = [str(ffmpeg.path), "-hide_banner", "-loglevel", "error", "-y"]
     if media.is_video and middle > 0:
         argv += ["-ss", f"{middle:g}"]
-    argv += ["-i", str(media.path), "-vf", "scale=1024:-2",
+    convert = source_format.to_equirect(media.width, media.height, size=(1024, 512))         if source_format else ""
+    argv += ["-i", str(media.path), "-vf", convert or "scale=1024:-2",
              "-frames:v", "1", "-q:v", "3", str(target)]
     result = subprocess.run(argv, capture_output=True, text=True, errors="replace")
     if result.returncode != 0 or not target.exists():
@@ -620,11 +686,13 @@ def _grade_sample(source: str, ffmpeg, selection: FrameSelection) -> Path:
 def cmd_extract(args: argparse.Namespace) -> int:
     ffmpeg = resolve_ffmpeg(args.ffmpeg)
     rig = load_rig(args.rig)
+    source_format = _source_format_from_args(args)
 
     if getattr(args, "auto_grade", False):
         from . import autograde
 
-        sample_frame = _grade_sample(args.media[0], ffmpeg, _selection_from_args(args))
+        sample_frame = _grade_sample(args.media[0], ffmpeg, _selection_from_args(args),
+                                     source_format)
         rig.grade, analysis = autograde.auto_grade(ffmpeg, sample_frame)
         for line in autograde.describe(analysis, rig.grade):
             print(f"  {line}")
@@ -663,10 +731,15 @@ def cmd_extract(args: argparse.Namespace) -> int:
     totals = ExtractResult()
     for target in args.media:
         media = probe_media(target, ffmpeg)
-        if not media.looks_equirectangular:
+        if not source_format.is_equirect:
+            equirect = source_format.equirect_size_for(media)
+            print(f"{media.path.name}: {source_format.label} "
+                  f"-> {equirect[0]}x{equirect[1]} equirectangular")
+        elif not media.looks_equirectangular:
             print(
                 f"warning: {media.path.name} is {media.width}x{media.height} "
-                f"(aspect {media.aspect:.3f}), not the 2:1 of an equirectangular source",
+                f"(aspect {media.aspect:.3f}), not the 2:1 of an equirectangular source. "
+                f"If it is a camera's raw file, pass --projection dfisheye",
                 file=sys.stderr,
             )
 
@@ -684,6 +757,7 @@ def cmd_extract(args: argparse.Namespace) -> int:
             ffmpeg=ffmpeg,
             on_analysis=lambda note: print(f"  {note}"),
             mask_mode=args.mask,
+            source_format=source_format,
         )
 
         for line in mask_apply.summarize(plan.mask_plan) if plan.mask_plan else []:
@@ -736,6 +810,37 @@ def cmd_extract(args: argparse.Namespace) -> int:
 # -- parser -----------------------------------------------------------------
 
 
+def _add_source_arguments(parser: argparse.ArgumentParser) -> None:
+    """Flags describing what projection the footage is in.
+
+    Consumer 360 cameras write two files: a stitched equirectangular one, and the raw
+    dual-fisheye one straight off the two lenses. The raw file is the sharper of the
+    two -- nothing has resampled it yet -- so it is worth being able to feed it in
+    directly rather than round-tripping through the camera's desktop app.
+    """
+    parser.add_argument("--projection", choices=sorted(PROJECTIONS), default="equirect",
+                        help="what the source is: equirect (a stitched 360 file, the "
+                             "default), dfisheye (a raw file with both lenses side by "
+                             "side), or fisheye (one lens)")
+    parser.add_argument("--lens-fov", dest="lens_fov", type=float,
+                        metavar="DEG",
+                        help=f"field of view of one lens, for the fisheye projections "
+                             f"(default {DEFAULT_LENS_FOV:g}; `probe --fit-lens` "
+                             f"measures it from the footage)")
+    parser.add_argument("--lens-layout", dest="lens_layout",
+                        choices=["sbs", "streams"], default=None,
+                        help="where the two lenses are: sbs, side by side in one frame "
+                             "(default), or streams, one video stream each -- which is "
+                             "how the QooCam 8K writes them")
+    parser.add_argument("--lens-rotate", dest="lens_rotate", metavar="DEG[,DEG]",
+                        help="clockwise rotation to bring each lens upright, one figure "
+                             "per lens. Cameras with opposed sensors need '90,-90'")
+    parser.add_argument("--lens-trim", dest="lens_trim", type=float, metavar="DEG",
+                        help="ignore this many degrees either side of the stitch line, "
+                             "where a fisheye is softest and the two lenses disagree. "
+                             "The poles go with it, since the seam runs through them")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="360extract",
@@ -758,6 +863,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     probe = sub.add_parser("probe", help="report dimensions, frame rate and duration of sources")
     probe.add_argument("media", nargs="+")
+    probe.add_argument("--fit-lens", action="store_true",
+                       help="measure the lens field of view of a dual-fisheye source "
+                            "from how well its two lenses line up")
+    _add_source_arguments(probe)
     probe.set_defaults(func=cmd_probe)
 
     rig_parser = sub.add_parser("rig", help="create and inspect camera rigs")
@@ -821,6 +930,7 @@ def build_parser() -> argparse.ArgumentParser:
                              help="skip to this timestamp")
     project_new.add_argument("--end", type=float, metavar="SEC",
                              help="stop at this timestamp")
+    _add_source_arguments(project_new)
     project_new.add_argument("--classes", nargs="*", metavar="CLASS",
                              help="what masking removes (default: sky and the usual "
                                   "traffic). An empty list disables masking.")
@@ -967,6 +1077,7 @@ def build_parser() -> argparse.ArgumentParser:
     grading.add_argument("--saturation", type=float, help="1.0 leaves it alone")
     grading.add_argument("--gamma", type=float, help="1.0 leaves it alone")
 
+    _add_source_arguments(extract)
     extract.add_argument("--nadir", type=float, metavar="DEG",
                          help="add a nadir cone occluder of this many degrees, covering the "
                               "tripod, stick or car roof directly below the rig")

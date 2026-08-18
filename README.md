@@ -18,7 +18,7 @@ video ──► frames ──► camera tiles + masks ──► COLMAP ──►
 
 > **Status: pre-1.0 and under active development.** The whole pipeline has been run end to end
 > on real footage — see [Verified on real footage](#verified-on-real-footage) — and is covered
-> by over 790 tests, including tests that drive real COLMAP. Interfaces may still change
+> by over 840 tests, including tests that drive real COLMAP. Interfaces may still change
 > without notice.
 
 ---
@@ -90,8 +90,16 @@ the page, so a plain web upload control couldn't hand the server one.
 **Source.** Tell it what the footage is: a stitched **equirectangular** file (the default), a
 raw **dual fisheye** file straight off the two lenses, or a single **fisheye**. Picking dual
 fisheye is worth doing when your camera offers both files for the same shot — it avoids
-resampling the image twice (once in the camera's stitch, once here). See
-[Source projection](#source-projection-dual-fisheye) for why, and the measured picture quality.
+resampling the image twice (once in the camera's stitch, once here).
+
+A file that gives itself away sets these up for you: two video streams of the same square
+size is a lens each, which is how the QooCam 8K, Insta360 `.insv` above 5.7K and DJI `.osv`
+all record. The canvas then shows the two lenses side by side, as shot; **show ▸ the panorama
+they make** switches to the stitched view to check it. **Fit** measures the lens field of view
+and how the sensors are mounted from the footage itself, and **trim edges** cuts the soft,
+badly stitched rim off each lens before it can reach training. See
+[Source projection](#source-projection-dual-fisheye) for the details and the measured
+picture quality.
 
 **Frame selection.** Four modes, picked from a dropdown, with a live estimate of how many
 frames each one will produce as you adjust the value:
@@ -122,12 +130,23 @@ what each backend can and can't see.
 **Process** kicks off extraction and masking together, with a live log and a cancel button.
 Re-running after a settings change only redoes what's now stale.
 
-### Capture — place the cameras on the panorama, by hand
+### Capture — place the cameras on the picture you shot, by hand
 
-The panorama fills the canvas with every camera's field-of-view drawn on it as a footprint, so
+The frame fills the canvas with every camera's field-of-view drawn on it as a footprint, so
 you can see at a glance whether the car's hood or the person holding the stick falls inside a
 camera. **Drag a footprint to re-aim it** — yaw and pitch follow the mouse — instead of typing
 angles into a form. The rig's per-camera FOV, format and interpolation are editable alongside it.
+
+**Raw two-lens footage keeps its own view.** A capture shot on two fisheye lenses is rigged on
+those lenses: two circles side by side, footprints projected onto them, and a camera aimed
+across the stitch drawn as the two shapes it really is. The **show** control switches between
+that and the panorama, and the choice follows you from Start — the same capture described two
+ways would be a poor way to place a rig. Bearings are marked around each circle's horizon, so
+you can aim a camera *away* from the seam, where the two lenses disagree most.
+
+The lens view is a projection for the eye and the mouse: the frames on disk stay
+equirectangular, and that is still what the camera tiles are cut from. Painting an occluder is
+done on the panorama, since the painted mask is stored in those coordinates.
 
 The same panorama carries a **mask overlay**, tinting exactly what extraction would exclude —
 static occluders and, once run, the dynamic ones — so you're looking at real coverage, not a
@@ -135,6 +154,9 @@ guess. That overlay is pixel-accurate on purpose: `tests/test_overlay_geometry.p
 shipped `geometry.js` under node, places markers just inside and just outside each drawn edge,
 and checks them against real ffmpeg extractions. A UI that draws coverage it doesn't actually
 have is worse than no UI, because it hides exactly the occluder you were trying to exclude.
+The lens view is held to the same standard: markers at known bearings are pushed through
+`v360` and compared against where the overlay says they land, so which circle holds the front
+hemisphere and how the back one is mirrored are measured facts rather than assumptions.
 
 **Painting occluders.** A nadir cone handles the ground below the rig, but a hood, a mount arm,
 or a wing mirror isn't a neat cone — paint it directly onto the panorama instead. Paint once, and
@@ -295,38 +317,101 @@ not then flood the dataset with near-duplicates from wherever the operator stopp
 
 ### Source projection (dual fisheye)
 
-Most 360 cameras write **two** files for the same shot: a stitched equirectangular one, and the
-raw one straight off the two lenses — two circular images side by side. 360extract reads either.
+Most 360 cameras write **two** files for the same shot: a stitched equirectangular one,
+and the raw one straight off the lenses. 360extract reads either. The raw file is the
+better source — its pixels have been resampled by nothing — but it has to be *declared*,
+because nothing about its dimensions gives it away.
 
-In the app it's the **projection** dropdown in Start ▸ Source, beside the file. Pick
-`dual fisheye` and the panorama appears on the canvas; the lens field of view sits under it
-(190° is the usual figure — check the camera's specs).
+```bash
+# what is this file?
+360extract probe RAW.MOV --fit-lens
 
-| Projection | The source is |
-|---|---|
-| `equirect` | a stitched 360 file, 2:1 (the default) |
-| `dfisheye` | a raw file with both lenses side by side |
-| `fisheye` | one lens, covering less than the sphere |
+# a project that reads it
+360extract project new dataset/ --source RAW.MOV --rig car-forward \
+    --projection dfisheye --lens-layout streams --lens-rotate 90,-90 \
+    --lens-fov 194 --lens-trim 6
+```
 
-**Why bother with the raw file.** The camera's stitch is a resample, and often a lossy re-encode
-on top of it. Feeding the raw file means the pixels are resampled exactly once — by the same
-`v360` that cuts the camera tiles — instead of twice. Tiles come out of a dual-fisheye source
-essentially identical to tiles cut from the stitched panorama of the same footage: the front
-camera measures ~36 dB PSNR against its stitched counterpart on the synthetic clip in
-`tests/test_extract_integration.py` (a wrong projection would land near 10), and 74 dB on a
-lossless still, where the h.264 in that clip is not part of the difference.
+In the app it is **Start ▸ Source**: pick the projection and the panel fills in with the
+lens controls, the canvas shows the lenses side by side, and **show ▸ the panorama they
+make** checks the result before anything is extracted. That choice carries into Capture,
+which places the rig on the same picture — see
+[Capture](#capture--place-the-cameras-on-the-picture-you-shot-by-hand).
 
-**You have to say so.** A raw two-lens file is 2:1 as well, so nothing about its dimensions gives
-it away. Left as `equirect` it extracts happily and produces a dataset of the wrong
-directions — which COLMAP will try, and fail, to reconstruct.
+#### The three things a file cannot tell you
 
-**What it costs.** The two lenses share the frame's width, so a 5760-wide dual fisheye at 190°
-carries the same detail as a 5456-wide panorama, and that is the size the working set and the
-automatic tile sizes are computed from. Stitching seams and blending are the camera's job, not
-this tool's: `v360` maps each lens's own circle, and the small overlap between them is where a
-real stitcher would blend. For most photogrammetry that is fine — features near the seam are
-covered by the neighbouring camera anyway — but if your footage has heavy parallax right at the
-seam, the camera's own stitch may match better there.
+| Control | CLI | What it means |
+|---|---|---|
+| projection | `--projection` | `equirect` (stitched, the default), `dfisheye` (two lenses), `fisheye` (one) |
+| lenses | `--lens-layout` | `sbs`: both in one frame. `streams`: **one video stream per lens** |
+| rotation | `--lens-rotate 90,-90` | clockwise turn that puts each lens upright, one figure per lens |
+| lens FOV | `--lens-fov` | how much one lens sees; past 180° is the overlap the stitch uses |
+| trim edges | `--lens-trim` | ignore this many degrees either side of the stitch line |
+
+**A lens per stream** is not a rare shape. The QooCam 8K writes two 3840×3840 HEVC
+tracks; [Insta360 `.insv` at 5.7K and
+above](https://onlinemanual.insta360.com/developer/en-us/resource/integration) and
+[DJI `.osv`](https://github.com/yoshihiro0323/osv2mov) do the same. Software that opens
+one of these and shows a single circle is reading track one and ignoring the other half
+of the sphere. Both extensions are MP4 containers, so ffmpeg reads them by content and
+the file dialog now offers them.
+
+**Rotation matters more than it sounds.** Sensors are mounted however the body needed
+them, and the QooCam's two are turned in *opposite* directions. Get it wrong and you
+still get a panorama — with its back half upside down.
+
+#### Fitting instead of guessing
+
+`--fit-lens` (CLI) and **Fit** (beside the lens FOV field) measure both settings from the
+footage. The two lenses meet on a great circle; a wrong field of view or a wrong mounting
+makes the picture jump across it, and that jump is measurable. Several frames from
+across the clip are sampled, because one frame with a wall close on one side scores its
+own parallax as if it were a bad lens.
+
+```
+Q360_20260709_053207_000001.MOV
+  3840x3840  aspect 1.000  video  hevc  2 video streams
+  30 fps  34.83s  ~1045 frames
+  looks like dual fisheye, 190° lenses (one stream per lens)
+  lenses line up best at 194°, mounted 90,-90° (mismatch 11.4)
+```
+
+One limit is worth knowing: only the *relative* rotation is measurable. Turning **both**
+lenses over stitches exactly as well and puts the world upside down, so that tie is
+broken by assuming the sky is the brighter half of the picture — right outdoors, wrong at
+night. Check the panorama view; the rotation control overrides it.
+
+#### Trimming the lens edges
+
+`v360` hands one lens over to the other at exactly 90° from each lens axis — which is
+the softest, most vignetted part of a fisheye, and where the stitch's parallax error
+lives. `--lens-trim 6` ignores a 6° band either side of that line, so those pixels never
+reach training. In the mask preview it looks like what it is: a ring cut off the rim of
+each circle.
+
+That band is not a rectangle. The line one lens hands over on runs through the zenith and
+the nadir, so trimming closes the poles too — the sky straight up and the ground straight
+down go with it. On a vehicle capture that is usually a bonus (it takes the roof), but it
+is worth knowing before you trim 20°.
+
+#### What it costs
+
+The two lenses share the frame, so a 5760-wide side-by-side file carries the detail of a
+5456-wide panorama at 190° lenses — and that is the size the working set and the
+automatic tile sizes are derived from. With a lens per stream the pair is twice the
+file's own width: the QooCam's 3840×3840 tracks become a 7088×3544 panorama.
+
+Stitching seams and blending are the camera's job, not this tool's: each lens's own
+circle is mapped and the overlap between them is where a real stitcher would blend. For
+photogrammetry that is usually fine — features near the seam are covered by the
+neighbouring camera anyway, and `--lens-trim` removes them from training entirely — but
+if your footage has heavy parallax right at the seam, the camera's own stitch may match
+better there.
+
+Tiles cut from a dual-fisheye source come out essentially identical to tiles cut from the
+stitched panorama of the same footage: ~36 dB PSNR against its stitched counterpart on
+the synthetic clip in `tests/test_extract_integration.py` (a wrong projection lands near
+10), and 74 dB on a lossless still.
 
 ### Grading
 
@@ -669,12 +754,19 @@ structure-from-motion.
 
 ```bash
 360extract probe CLIP.mp4 OTHER.mp4
+360extract probe RAW.MOV --fit-lens        # and measure how its two lenses are read
 ```
 
-Dimensions, aspect, codec, frame rate, duration, estimated frame count. Warns when a source is
-not 2:1 — extraction will still run, but the geometry will be wrong. A camera's *raw* two-lens
-file is 2:1 as well, so the warning says nothing about it; declare that one with
-`--projection dfisheye` (see [Source projection](#source-projection-dual-fisheye)).
+Dimensions, aspect, codec, frame rate, duration, estimated frame count, and how many video
+streams the file carries. Warns when a source is not 2:1 — extraction will still run, but the
+geometry will be wrong. A camera's *raw* two-lens file is not a panorama at all: when the
+container gives that away (two streams of the same square size), `probe` says so and prints
+the flags to extract it with.
+
+`--fit-lens` goes further and measures the lens field of view and the sensor mounting from the
+footage, by projecting the panorama at a range of candidates and looking at how much the
+picture jumps where one lens hands over to the other. Takes about 25 seconds on an 8K clip.
+See [Source projection](#source-projection-dual-fisheye).
 
 ## `rig`
 
@@ -712,7 +804,10 @@ Presets are accepted anywhere a rig file is, so `--rig ring` works without writi
 | `--all-frames` | everything |
 | `--start SEC` / `--end SEC` | limit to a time window |
 | `--projection {equirect,dfisheye,fisheye}` | what the footage is (default `equirect`) |
-| `--lens-fov DEG` | field of view of one lens, for the fisheye projections (default 190) |
+| `--lens-layout {sbs,streams}` | both lenses in one frame, or one video stream each |
+| `--lens-rotate 90,-90` | clockwise turn that puts each lens upright |
+| `--lens-fov DEG` | field of view of one lens (default 190; `probe --fit-lens` measures it) |
+| `--lens-trim DEG` | ignore this much either side of the stitch line |
 | `--classes ...` | what masking removes; an empty list disables masking |
 | `--name`, `--force` | project name; replace an existing `project.json` |
 
@@ -740,7 +835,8 @@ is the command to reach for; `extract` and `mask` below are the project-less ver
 
 Frame selection: `--sharp SECONDS` · `--fps N` · `--every N` · `--all-frames` ·
 `--start SEC` · `--end SEC`.
-Source: `--projection {equirect,dfisheye,fisheye}` · `--lens-fov DEG`.
+Source: `--projection {equirect,dfisheye,fisheye}` · `--lens-layout {sbs,streams}` ·
+`--lens-rotate DEG,DEG` · `--lens-fov DEG` · `--lens-trim DEG`.
 Output: `-o/--output-dir` · `--width` / `--height` · `--layout {brush,flat}` ·
 `--max-streams` (cameras per ffmpeg pass, default 8).
 Occluders: `--nadir DEG` · `--mask {sidecar,skip,burn,none}`.

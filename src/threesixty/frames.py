@@ -19,6 +19,7 @@ from . import sharp
 from .dataset import frames_dir
 from .ffmpeg import FFmpegError, FFmpegInfo, MediaInfo
 from .plan import FrameSelection, safe_stem
+from .source import SourceFormat
 
 __all__ = ["FramesResult", "extract_frames", "frames_dir"]
 
@@ -34,9 +35,18 @@ class FramesResult:
 def extract_frames(ffmpeg: FFmpegInfo, media: MediaInfo, selection: FrameSelection,
                    output_root: str | Path, quality: int = 2,
                    on_progress=None, on_analysis=None, should_cancel=None,
-                   overwrite: bool = True) -> FramesResult:
-    """Decode `media`, thin to `selection`, write equirect JPEGs to frames/."""
+                   overwrite: bool = True,
+                   source_format: SourceFormat | None = None) -> FramesResult:
+    """Decode `media`, thin to `selection`, write equirect JPEGs to frames/.
+
+    A source that is not already equirectangular -- a camera's raw dual-fisheye file --
+    is projected here, once, at its own pixel density. That is deliberately the only
+    place it happens: the working set is equirect by definition, so the rig, the masks
+    and the canvas never have to know what the footage arrived as.
+    """
     selection.validate()
+    source_format = source_format or SourceFormat()
+    source_format.validate()
 
     # Sharp mode needs a decode pass to score frames before it can name the ones to keep.
     if selection.mode == "sharp" and media.is_video and not selection.frames:
@@ -61,9 +71,20 @@ def extract_frames(ffmpeg: FFmpegInfo, media: MediaInfo, selection: FrameSelecti
         argv += ["-to", f"{selection.end:g}"]
     argv += ["-i", str(media.path)]
 
-    prefix = selection.filter_prefix(media)
-    if prefix:
-        argv += ["-vf", prefix]
+    # Thin first, project second: the conversion is the expensive filter, so it should
+    # only ever run on frames that are being kept. With a lens per stream the thinning
+    # goes on each lens, before they are stacked, for the same reason.
+    thin = selection.filter_prefix(media)
+    size = source_format.equirect_size_for(media)
+    if source_format.needs_graph:
+        argv += ["-filter_complex",
+                 ";".join(source_format.ingest_chains(size, thin=thin, label="src")),
+                 "-map", "[src]"]
+    else:
+        convert = source_format.to_equirect(media.width, media.height, size=size)
+        chain = ",".join(filter(None, [thin, convert]))
+        if chain:
+            argv += ["-vf", chain]
     # vfr so a `select` expression drops rather than duplicates the frames it rejects.
     argv += ["-fps_mode", "vfr", "-q:v", str(quality), "-progress", "pipe:1",
              str(out_dir / pattern)]

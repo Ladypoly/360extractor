@@ -8,6 +8,7 @@ from threesixty.extract import run_extraction
 from threesixty.ffmpeg import probe_media
 from threesixty.plan import FrameSelection, plan_extraction
 from threesixty.rig import Camera, Output, Rig, ring
+from threesixty.source import SourceFormat
 
 pytestmark = pytest.mark.ffmpeg
 
@@ -190,3 +191,76 @@ def test_still_image_source_yields_one_image_per_camera(ffmpeg, equirect_clip, t
     plan = plan_extraction(media, ring(3, output=SMALL), FrameSelection("fps", 2), tmp_path / "out")
     result = run_extraction(plan, ffmpeg)
     assert result.images_written == 3
+
+
+# -- dual fisheye ----------------------------------------------------------
+#
+# The raw file off a 360 camera, before its desktop app stitches it. The tests that
+# matter are the ones comparing it against the stitched panorama of the same content:
+# a projection that is merely plausible still produces images, just of the wrong
+# directions, and nothing downstream would notice.
+
+
+def psnr(ffmpeg, first, second):
+    """How alike two images are, in dB. Above ~30 is "the same picture"."""
+    import re
+    import subprocess
+
+    result = subprocess.run(
+        [str(ffmpeg.path), "-hide_banner", "-i", str(first), "-i", str(second),
+         "-lavfi", "psnr", "-f", "null", "-"],
+        capture_output=True, text=True)
+    match = re.search(r"average:([0-9.]+|inf)", result.stderr)
+    assert match, result.stderr
+    return float("inf") if match.group(1) == "inf" else float(match.group(1))
+
+
+def test_dual_fisheye_extracts_the_same_directions_as_the_panorama(
+        ffmpeg, equirect_clip, dfisheye_clip, tmp_path):
+    """The load-bearing test: same content, two containers, same pictures out.
+
+    A front camera looks straight down the middle of one lens, where a dual fisheye is
+    at its sharpest and the two paths should agree almost exactly. Anything wrong with
+    the projection -- a swapped lens, a 90-degree offset, an unhandled input -- collapses
+    this to the ~10 dB of two unrelated images.
+    """
+    # A fixed size, so the two runs are comparable pixel for pixel: automatic sizing
+    # would give the raw file the slightly smaller tile its own density earns.
+    fixed = Output(width=320, height=240, format="png", auto=False)
+    front = Rig(cameras=[Camera(name="front", yaw=0, h_fov=80, v_fov=60)], output=fixed)
+
+    for source, root, fmt in (
+            (equirect_clip, tmp_path / "eq", SourceFormat()),
+            (dfisheye_clip, tmp_path / "raw", SourceFormat("dfisheye", 190))):
+        plan = plan_extraction(probe_media(source, ffmpeg), front,
+                               FrameSelection("fps", 1), root, source_format=fmt)
+        run_extraction(plan, ffmpeg)
+
+    stitched = images_in(tmp_path / "eq" / "images" / "front" / "images")[0]
+    raw = images_in(tmp_path / "raw" / "images" / "front" / "images")[0]
+    assert psnr(ffmpeg, stitched, raw) > 30
+
+
+def test_dual_fisheye_still_gives_every_camera_its_own_direction(
+        ffmpeg, dfisheye_clip, tmp_path):
+    media = probe_media(dfisheye_clip, ffmpeg)
+    plan = plan_extraction(media, ring(4, output=SMALL), FrameSelection("fps", 1),
+                           tmp_path, source_format=SourceFormat("dfisheye", 190))
+    run_extraction(plan, ffmpeg)
+
+    first_frames = [images_in(job.directory)[0] for job in plan.passes[0].jobs]
+    assert len({digest(p) for p in first_frames}) == 4
+
+
+def test_burning_an_occluder_onto_a_dual_fisheye_source_runs(
+        ffmpeg, dfisheye_clip, tmp_path):
+    """The one path that has to normalize first, because the mask is equirect."""
+    media = probe_media(dfisheye_clip, ffmpeg)
+    rig = ring(2, output=SMALL)
+    rig.occluders = [{"type": "nadir_cone", "angle": 30}]
+    plan = plan_extraction(media, rig, FrameSelection("fps", 1), tmp_path,
+                           ffmpeg=ffmpeg, mask_mode="burn",
+                           source_format=SourceFormat("dfisheye", 190))
+    assert plan.burn_mask is not None
+    result = run_extraction(plan, ffmpeg)
+    assert result.images_written == 4

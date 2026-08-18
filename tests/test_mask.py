@@ -59,6 +59,40 @@ class TestEquirectMask:
         assert all(v < 5 for v in grid[2]), "sky should be ignored"
         assert all(v > 250 for v in grid[16]), "horizon should be kept"
 
+    def test_seam_band_ignores_the_stitch_line_and_the_poles(self, ffmpeg, tmp_path):
+        """The dual-fisheye trim: the band where one lens hands over to the other.
+
+        It is not a rectangle. The hand-over happens on the great circle 90 degrees from
+        both lens axes, which runs through the zenith and the nadir -- so the band widens
+        towards the poles and closes over them entirely. Worth pinning: a rectangle here
+        would leave the worst-stitched pixels of all, the ones straight up and straight
+        down, in the training set.
+        """
+        occluders = [geometric.Occluder("seam_band", angle=10)]
+        mask = geometric.build_equirect_mask(ffmpeg, occluders, 512, 256,
+                                             tmp_path / "eq.png")
+        grid = luma_grid(ffmpeg, mask)          # 32x32, top row is the zenith
+
+        equator = grid[16]
+        # The lens axes are dead ahead and behind: the middle of the frame and its edges
+        # are kept, the quarter and three-quarter columns are the seams.
+        assert equator[16] > 250 and equator[0] > 250
+        # The grid averages 16 source pixels per cell, so a cell straddling the band's
+        # edge lands in between; the middle of each band is unambiguous.
+        assert equator[8] < 128 and equator[24] < 128
+        assert all(v < 5 for v in grid[0]), "the zenith is on the seam, whole"
+        assert all(v < 5 for v in grid[31]), "so is the nadir"
+
+    def test_a_wider_trim_ignores_more(self, ffmpeg, tmp_path):
+        def ignored(angle):
+            mask = geometric.build_equirect_mask(
+                ffmpeg, [geometric.Occluder("seam_band", angle=angle)], 256, 128,
+                tmp_path / f"eq{angle}.png")
+            grid = luma_grid(ffmpeg, mask)
+            return sum(v < 128 for row in grid for v in row)
+
+        assert 0 < ignored(5) < ignored(15) < ignored(30)
+
     def test_no_occluders_leaves_everything_white(self, ffmpeg, tmp_path):
         mask = geometric.build_equirect_mask(ffmpeg, [], 256, 128, tmp_path / "eq.png")
         grid = luma_grid(ffmpeg, mask)

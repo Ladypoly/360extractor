@@ -41,9 +41,26 @@ class CamerasResult:
     cancelled: bool = False
 
 
+def _static_occluders(rig: Rig, sky_cone_angle: float | None,
+                      seam_band: float = 0.0) -> list:
+    """Everything that is masked in the same place on every frame.
+
+    The rig's own occluders, plus two that come from elsewhere: the sky cone (a
+    dependency-free stand-in for a sky model) and the dual-fisheye seam band, which
+    belongs to the *source* rather than the rig -- it is the trimmed outer edge of each
+    lens, the softest and worst-stitched pixels a two-lens camera produces.
+    """
+    raw = list(rig.occluders)
+    if sky_cone_angle and sky_cone_angle > 0:
+        raw.append({"type": "zenith_cone", "angle": float(sky_cone_angle)})
+    if seam_band and seam_band > 0:
+        raw.append({"type": "seam_band", "angle": float(seam_band)})
+    return [o for o in (geometric.Occluder.from_dict(d) for d in raw) if o.kind != "ml"]
+
+
 def _project_masks(ffmpeg: FFmpegInfo, rig: Rig, cameras, sizes, directories,
                    sample, output_root: Path, clip: str,
-                   sky_cone_angle: float | None) -> int:
+                   sky_cone_angle: float | None, seam_band: float = 0.0) -> int:
     """Project static occluders and the sky cone into per-camera sidecar masks.
 
     Static occluders are rigid to the rig, so one equirect mask projects to one mask per
@@ -51,11 +68,7 @@ def _project_masks(ffmpeg: FFmpegInfo, rig: Rig, cameras, sizes, directories,
     single-pass extractor used. Sky exclusion rides along as a zenith cone here; the
     per-frame semantic path (detection on the equirect frames) layers on later.
     """
-    raw = list(rig.occluders)
-    if sky_cone_angle and sky_cone_angle > 0:
-        raw.append({"type": "zenith_cone", "angle": float(sky_cone_angle)})
-    occluders = [o for o in (geometric.Occluder.from_dict(d) for d in raw)
-                 if o.kind != "ml"]
+    occluders = _static_occluders(rig, sky_cone_angle, seam_band)
     if not occluders:
         return 0
 
@@ -83,7 +96,8 @@ def _sequence(frames_directory: Path) -> tuple[str, int]:
 
 
 def _detect_equirect_masks(ffmpeg, frames_directory: Path, rig: Rig, detect,
-                           sky_cone_angle, work_dir: Path, on_progress, should_cancel):
+                           sky_cone_angle, work_dir: Path, on_progress, should_cancel,
+                           seam_band: float = 0.0):
     """Detect on each equirect frame and write a per-frame ignore-mask.
 
     Returns `(directory, frames_with_no_detection)`. Detection runs on the panorama
@@ -111,11 +125,7 @@ def _detect_equirect_masks(ffmpeg, frames_directory: Path, rig: Rig, detect,
     sample = cv2.imread(str(frames[0]))
     height, width = sample.shape[:2]
 
-    raw = list(rig.occluders)
-    if sky_cone_angle and sky_cone_angle > 0:
-        raw.append({"type": "zenith_cone", "angle": float(sky_cone_angle)})
-    occluders = [o for o in (geometric.Occluder.from_dict(d) for d in raw)
-                 if o.kind != "ml"]
+    occluders = _static_occluders(rig, sky_cone_angle, seam_band)
     static = None
     if occluders:
         static_path = geometric.build_equirect_mask(
@@ -174,7 +184,7 @@ def generate_cameras(ffmpeg: FFmpegInfo, frames_directory: str | Path, rig: Rig,
                      output_root: str | Path, clip: str | None = None,
                      sky_cone_angle: float | None = None, detect=None,
                      on_progress=None, on_mask_progress=None, should_cancel=None,
-                     overwrite: bool = True) -> CamerasResult:
+                     overwrite: bool = True, seam_band: float = 0.0) -> CamerasResult:
     """Project every extracted frame through the rig into images/<camera>/.geometry/.
 
     Also writes the matching per-camera mask sidecars so the result is training-ready:
@@ -249,7 +259,8 @@ def generate_cameras(ffmpeg: FFmpegInfo, frames_directory: str | Path, rig: Rig,
         root = Path(output_root)
         detected = _detect_equirect_masks(
             ffmpeg, frames_directory, rig, detect, sky_cone_angle,
-            root / ".threesixty" / "masks", on_mask_progress, should_cancel)
+            root / ".threesixty" / "masks", on_mask_progress, should_cancel,
+            seam_band=seam_band)
         equirect_masks, undetected = detected if detected is not None else (None, [])
         if equirect_masks is not None:
             # Per-frame masks (detection): project the whole sequence.
@@ -259,7 +270,8 @@ def generate_cameras(ffmpeg: FFmpegInfo, frames_directory: str | Path, rig: Rig,
         else:
             # Static only: one rigid mask per camera, linked beside every frame.
             masks_written = _project_masks(ffmpeg, rig, cameras, sizes, directories,
-                                           sample, root, clip, sky_cone_angle)
+                                           sample, root, clip, sky_cone_angle,
+                                           seam_band)
         # Every image gets a mask, even where masking found nothing -- an image with
         # no mask at all is indistinguishable from one masking failed on.
         names = [camera.name for camera in cameras]

@@ -11,6 +11,7 @@ from threesixty.plan import (
     safe_stem,
 )
 from threesixty.rig import Camera, Output, Rig, ring
+from threesixty.source import SourceFormat
 
 
 @pytest.fixture
@@ -104,6 +105,55 @@ class TestFilterGraph:
     def test_rejects_empty_camera_list(self):
         with pytest.raises(ValueError, match="no cameras"):
             build_filter_graph([], ring(1), "")
+
+
+class TestDualFisheyeGraph:
+    """A raw two-lens source is read by v360 directly, not converted first."""
+
+    def test_cameras_read_the_fisheye_input(self):
+        rig = ring(2)
+        graph, _ = build_filter_graph(rig.normalized_cameras(), rig, "",
+                                      source=SourceFormat("dfisheye", 190))
+        assert graph.count("v360=dfisheye:rectilinear:ih_fov=190:iv_fov=190") == 2
+        # One resample per camera: no intermediate equirect anywhere in the graph.
+        assert ":e:" not in graph
+
+    def test_burning_an_occluder_normalizes_first(self):
+        # The occluder mask is equirect, so the panorama has to be too before the
+        # multiply -- and the cameras then cut out of that, as `e`.
+        rig = ring(2)
+        graph, _ = build_filter_graph(rig.normalized_cameras(), rig, "", burn=True,
+                                      source_size=(3840, 1920),
+                                      source=SourceFormat("dfisheye", 190))
+        assert "v360=dfisheye:e:ih_fov=190:iv_fov=190:w=3840:h=1920" in graph
+        assert graph.count("v360=e:rectilinear:") == 2
+
+    def test_an_equirect_source_is_unchanged(self):
+        rig = ring(2)
+        plain, _ = build_filter_graph(rig.normalized_cameras(), rig, "fps=2")
+        explicit, _ = build_filter_graph(rig.normalized_cameras(), rig, "fps=2",
+                                         source=SourceFormat())
+        assert plain == explicit
+
+    def test_tiles_are_sized_from_the_equirect_equivalent_width(self, still):
+        # 5760 across two 190-degree lenses is 5456 equirect pixels, so a 90-degree
+        # camera earns 5456/4 -- not 5760/4, which would be inventing detail.
+        rig = ring(4)
+        plan = plan_extraction(still, rig, FrameSelection("all"), Path("out"),
+                               source_format=SourceFormat("dfisheye", 190))
+        assert plan.passes[0].jobs[0].width == 1364
+
+    def test_the_plan_carries_the_projection_into_the_argv(self, still, tmp_path):
+        plan = plan_extraction(still, ring(2), FrameSelection("all"), tmp_path,
+                               source_format=SourceFormat("dfisheye", 190))
+        argv = build_pass_argv(Path("ffmpeg"), plan, plan.passes[0])
+        graph = argv[argv.index("-filter_complex") + 1]
+        assert "dfisheye:rectilinear" in graph
+
+    def test_an_invalid_projection_is_refused_at_planning(self, still, tmp_path):
+        with pytest.raises(ValueError, match="projection"):
+            plan_extraction(still, ring(2), FrameSelection("all"), tmp_path,
+                            source_format=SourceFormat("equirectangular"))
 
 
 class TestPlanning:
