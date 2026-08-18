@@ -61,7 +61,7 @@ function buildTopBar() {
     setProject: (project) => {
       projectName.textContent = project ? project.name : "no project";
     },
-    setSource: (media) => {
+    setSource: (media, format) => {
       if (!media) { sourceName.textContent = ""; sourceInfo.textContent = ""; return; }
       sourceName.textContent = media.path.split(/[\\/]/).pop();
       const bits = [`${media.width}×${media.height}`];
@@ -71,7 +71,12 @@ function buildTopBar() {
       } else {
         bits.push("still");
       }
-      if (!media.looks_equirectangular) bits.push("not 2:1 — geometry will be wrong");
+      // Only meaningful for a file claiming to be a panorama already. A raw two-lens
+      // file is whatever shape its sensors are, and calling its geometry wrong once the
+      // projection has been declared is the opposite of the truth.
+      const raw = format && format.projection && format.projection !== "equirect";
+      if (raw) bits.push(format.projection === "dfisheye" ? "dual fisheye" : "fisheye");
+      else if (!media.looks_equirectangular) bits.push("not 2:1 — geometry will be wrong");
       sourceInfo.textContent = bits.join("  ·  ");
     },
   };
@@ -326,7 +331,11 @@ async function boot() {
   const host = document.getElementById("panels");
   const context = {
     api, state,
-    setSource: (media) => { state.media = media; topbar.setSource(media); },
+    setSource: (media, format) => {
+      state.media = media;
+      if (format) state.sourceFormat = format;
+      topbar.setSource(media, state.sourceFormat);
+    },
     goTo, report, flash, pokeJobs,
     applyProject, autosave, openProject, openRecent,
   };

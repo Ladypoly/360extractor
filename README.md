@@ -1,11 +1,16 @@
 # 360extract
 
-A 360° video is not a photogrammetry dataset. It's one wide-angle recording of a rig driving
-or walking through a scene, with the rig itself, its mount, and whoever is holding it baked
-into every frame. 360extract is an app that turns that video into a trained 3D Gaussian splat:
-it cuts the panorama into per-camera tiles, keeps the rig and the operator out of what gets
-trained, runs COLMAP and Brush, and shows you the result — all from one window, without hand-running
-five separate command-line tools.
+This tool is a full 360° video → 3D Gaussian splat pipeline, in one app:
+
+1. Extract the sharpest frames from the source video
+2. Mask out the rig, the operator, and moving objects (people, cars, sky)
+3. Cut each frame into per-camera tiles, aimed however you place the cameras
+4. Reconstruct camera poses and a sparse point cloud with COLMAP
+5. Train a 3D Gaussian splat with Brush
+6. View and clean up the trained splat, in an embedded SuperSplat viewer
+
+Every step runs from the app — ffmpeg, COLMAP, Brush and SuperSplat are all driven from one
+window, without hand-running five separate command-line tools.
 
 ```
 video ──► frames ──► camera tiles + masks ──► COLMAP ──► Brush ──► splat
